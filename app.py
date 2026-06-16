@@ -2,6 +2,7 @@ from flask import Flask, request
 import pandas as pd
 import requests
 import json
+import math
 from io import StringIO
 
 app = Flask(__name__)
@@ -30,6 +31,16 @@ def reverse_geocode(lat, lon):
         return obj["GeoObject"]["metaDataProperty"]["GeocoderMetaData"]["text"]
     except Exception:
         return "Адрес не найден"
+
+def haversine_distance_km(lat1, lon1, lat2, lon2):
+    r = 6371
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.asin(math.sqrt(a))
+    return r * c
+
 
 def get_route(start_lat, start_lon, end_lat, end_lon):
     coords = str(start_lon) + "," + str(start_lat) + ";" + str(end_lon) + "," + str(end_lat)
@@ -128,8 +139,44 @@ def home():
 
         routes = []
 
+        # Сначала быстро выбираем 30 ближайших карьеров по координатам.
+        # Потом только для них строим реальные маршруты.
+        filtered = filtered.copy()
+        filtered["approx_distance"] = filtered.apply(
+            lambda r: haversine_distance_km(
+                r["Широта"],
+                r["Долгота"],
+                client_lat,
+                client_lon
+            ),
+            axis=1
+        )
+
+        nearest_career_names = (
+            filtered
+            .sort_values("approx_distance")
+            .drop_duplicates(subset=["Название"])
+            .head(30)["Название"]
+            .tolist()
+        )
+
+        filtered = filtered[filtered["Название"].isin(nearest_career_names)]
+
+        route_cache = {}
+
         for _, row in filtered.iterrows():
-            distance_km, duration_min = get_route(row["Широта"], row["Долгота"], client_lat, client_lon)
+            route_key = (
+                round(row["Широта"], 6),
+                round(row["Долгота"], 6),
+                round(client_lat, 6),
+                round(client_lon, 6)
+            )
+
+            if route_key in route_cache:
+                distance_km, duration_min = route_cache[route_key]
+            else:
+                distance_km, duration_min = get_route(row["Широта"], row["Долгота"], client_lat, client_lon)
+                route_cache[route_key] = (distance_km, duration_min)
 
             if distance_km is None:
                 continue
