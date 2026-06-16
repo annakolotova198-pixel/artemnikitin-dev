@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 
 app = Flask(__name__)
@@ -139,8 +140,8 @@ def home():
 
         routes = []
 
-        # Сначала быстро выбираем 30 ближайших карьеров по координатам.
-        # Потом только для них строим реальные маршруты.
+        # Сначала выбираем 50 ближайших уникальных карьеров по координатам.
+        # Потом параллельно строим реальные маршруты только по ним.
         filtered = filtered.copy()
         filtered["approx_distance"] = filtered.apply(
             lambda r: haversine_distance_km(
@@ -152,31 +153,73 @@ def home():
             axis=1
         )
 
-        nearest_career_names = (
+        nearest_careers = (
             filtered
             .sort_values("approx_distance")
-            .drop_duplicates(subset=["Название"])
-            .head(30)["Название"]
-            .tolist()
+            .drop_duplicates(subset=["Название", "Широта", "Долгота"])
+            .head(50)
         )
 
-        filtered = filtered[filtered["Название"].isin(nearest_career_names)]
+        nearest_keys = set()
+        for _, r in nearest_careers.iterrows():
+            nearest_keys.add((
+                str(r["Название"]),
+                round(float(r["Широта"]), 6),
+                round(float(r["Долгота"]), 6)
+            ))
+
+        filtered = filtered[
+            filtered.apply(
+                lambda r: (
+                    str(r["Название"]),
+                    round(float(r["Широта"]), 6),
+                    round(float(r["Долгота"]), 6)
+                ) in nearest_keys,
+                axis=1
+            )
+        ]
 
         route_cache = {}
 
-        for _, row in filtered.iterrows():
-            route_key = (
-                round(row["Широта"], 6),
-                round(row["Долгота"], 6),
-                round(client_lat, 6),
-                round(client_lon, 6)
+        def fetch_route(r):
+            key = (
+                str(r["Название"]),
+                round(float(r["Широта"]), 6),
+                round(float(r["Долгота"]), 6)
             )
 
-            if route_key in route_cache:
-                distance_km, duration_min = route_cache[route_key]
-            else:
-                distance_km, duration_min = get_route(row["Широта"], row["Долгота"], client_lat, client_lon)
-                route_cache[route_key] = (distance_km, duration_min)
+            distance_km, duration_min = get_route(
+                r["Широта"],
+                r["Долгота"],
+                client_lat,
+                client_lon
+            )
+
+            return key, distance_km, duration_min
+
+        candidates = nearest_careers.to_dict("records")
+
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            futures = [executor.submit(fetch_route, r) for r in candidates]
+
+            for future in as_completed(futures):
+                try:
+                    key, distance_km, duration_min = future.result()
+                    route_cache[key] = (distance_km, duration_min)
+                except Exception:
+                    pass
+
+        for _, row in filtered.iterrows():
+            route_key = (
+                str(row["Название"]),
+                round(float(row["Широта"]), 6),
+                round(float(row["Долгота"]), 6)
+            )
+
+            if route_key not in route_cache:
+                continue
+
+            distance_km, duration_min = route_cache[route_key]
 
             if distance_km is None:
                 continue
