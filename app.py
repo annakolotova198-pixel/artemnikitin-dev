@@ -2,11 +2,12 @@ from flask import Flask, request
 import pandas as pd
 import requests
 import json
+from io import StringIO
 
 app = Flask(__name__)
 
 YANDEX_API_KEY = "aaaac1c5-442b-4970-9bd9-1f1929227a78"
-CSV_FILE = "careers.csv"
+CSV_FILE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSg5caW9yrTC7JLaz6YpYxH1WT20GyocPLToq_2tbvAktDz5yImYlF0z_C2xueHwk2F6l18xvKf3nKL/pub?output=csv"
 
 def geocode_address(address):
     url = "https://geocode-maps.yandex.ru/1.x/"
@@ -44,7 +45,10 @@ def get_route(start_lat, start_lon, end_lat, end_lon):
         return None, None
 
 def load_data():
-    df = pd.read_csv(CSV_FILE)
+    response = requests.get(CSV_FILE, timeout=20)
+    response.encoding = "utf-8"
+    csv_text = response.text
+    df = pd.read_csv(StringIO(csv_text))
     df["Цена м3"] = pd.to_numeric(df["Цена м3"], errors="coerce")
     df["Широта"] = pd.to_numeric(df["Широта"], errors="coerce")
     df["Долгота"] = pd.to_numeric(df["Долгота"], errors="coerce")
