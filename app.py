@@ -129,7 +129,7 @@ def home():
         elif sand_type == "Смесь любая":
             filtered = df[df["Вид товара"].str.contains("смесь|щпс|с4|с5|с6|с/4|с/5|с/6", case=False, na=False)]
         elif sand_type == "ГПС любая":
-            filtered = df[df["Вид товара"].str.contains("гпс|гравийно-песчан", case=False, na=False)]
+            filtered = df[df["Вид товара"].str.contains("гпс|пгс|гравийно-песчан|песчано-гравий|щебеночно-песчано-гравий", case=False, na=False)]
         elif sand_type == "Отсев любой":
             filtered = df[df["Вид товара"].str.contains("отсев", case=False, na=False)]
         elif sand_type == "Перевалка":
