@@ -49,7 +49,16 @@ def load_data():
     response.encoding = "utf-8"
     csv_text = response.text
     df = pd.read_csv(StringIO(csv_text))
-    df["Цена м3"] = pd.to_numeric(df["Цена м3"], errors="coerce")
+    df["Цена м3 текст"] = df["Цена м3"].astype(str)
+
+    df["Цена м3"] = (
+        df["Цена м3"]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+        .str.replace("по запросу", "0", case=False, regex=False)
+        .str.replace("По запросу", "0", regex=False)
+    )
+    df["Цена м3"] = pd.to_numeric(df["Цена м3"], errors="coerce").fillna(0)
     df["Широта"] = pd.to_numeric(df["Широта"], errors="coerce")
     df["Долгота"] = pd.to_numeric(df["Долгота"], errors="coerce")
     df["Стоимость доставки руб_км_м3"] = pd.to_numeric(df["Стоимость доставки руб_км_м3"], errors="coerce")
@@ -58,7 +67,15 @@ def load_data():
 @app.route("/", methods=["GET", "POST"])
 def home():
     df = load_data()
-    sand_types = ["Любой песок / ближайший карьер"] + sorted(df["Вид товара"].dropna().unique())
+    sand_types = [
+        "Любой материал / ближайший карьер",
+        "Песок любой",
+        "Щебень любой",
+        "Смесь любая",
+        "ГПС любая",
+        "Отсев любой",
+        "Перевалка"
+    ] + sorted(df["Вид товара"].dropna().unique())
 
     unique_careers = df.drop_duplicates(subset=["Название"])[["Название", "Широта", "Долгота", "Телефон"]]
     careers_for_map = []
@@ -92,7 +109,22 @@ def home():
         if client_lat is None or client_lon is None:
             return "<h1>Ошибка</h1><p>Адрес не найден через Яндекс.</p><a href='/'>Назад</a>"
 
-        filtered = df if sand_type == "Любой песок / ближайший карьер" else df[df["Вид товара"] == sand_type]
+        if sand_type == "Любой материал / ближайший карьер":
+            filtered = df
+        elif sand_type == "Песок любой":
+            filtered = df[df["Вид товара"].str.contains("песок", case=False, na=False)]
+        elif sand_type == "Щебень любой":
+            filtered = df[df["Вид товара"].str.contains("щебень", case=False, na=False)]
+        elif sand_type == "Смесь любая":
+            filtered = df[df["Вид товара"].str.contains("смесь|щпс|с4|с5|с6|с/4|с/5|с/6", case=False, na=False)]
+        elif sand_type == "ГПС любая":
+            filtered = df[df["Вид товара"].str.contains("гпс|гравийно-песчан", case=False, na=False)]
+        elif sand_type == "Отсев любой":
+            filtered = df[df["Вид товара"].str.contains("отсев", case=False, na=False)]
+        elif sand_type == "Перевалка":
+            filtered = df[df["Вид товара"].str.contains("перевалка", case=False, na=False)]
+        else:
+            filtered = df[df["Вид товара"] == sand_type]
 
         routes = []
 
@@ -121,6 +153,7 @@ def home():
                 "distance": round(distance_km, 1),
                 "duration": round(duration_min),
                 "sand_price": round(row["Цена м3"], 2),
+                "sand_price_text": row.get("Цена м3 текст", row["Цена м3"]),
                 "carrier_rate": round(carrier_rate, 2),
                 "sale_rate": round(sale_rate, 2),
                 "carrier_delivery_m3": round(carrier_delivery_m3, 2),
@@ -158,7 +191,7 @@ def home():
 
         products_html = "<ul>"
         for _, product in career_products.iterrows():
-            products_html += "<li>" + str(product["Вид товара"]) + " — " + str(product["Цена м3"]) + " ₽/м³</li>"
+            products_html += "<li>" + str(product["Вид товара"]) + " — " + str(product.get("Цена м3 текст", product["Цена м3"])) + " ₽/м³</li>"
         products_html += "</ul>"
 
         result_html += "<div class='result'>"
@@ -170,7 +203,7 @@ def home():
         result_html += "<p><b>Выбранный песок:</b> " + str(best["sand_type"]) + "</p>"
         result_html += "<p><b>Расстояние:</b> " + str(best["distance"]) + " км</p>"
         result_html += "<p><b>Время:</b> " + str(best["duration"]) + " мин</p>"
-        result_html += "<p><b>Цена песка:</b> " + str(best["sand_price"]) + " ₽/м³</p>"
+        result_html += "<p><b>Цена материала:</b> " + str(best["sand_price_text"]) + " ₽/м³</p>"
         result_html += "<p><b>Доставка перевозчик:</b> " + str(best["carrier_delivery_m3"]) + " ₽/м³</p>"
         result_html += "<p><b>Доставка продажа:</b> " + str(best["sale_delivery_m3"]) + " ₽/м³</p>"
         result_html += "<p><b>Цена закупки за 1 м³:</b> " + str(best["purchase_price_m3"]) + " ₽</p>"
@@ -187,13 +220,13 @@ def home():
         result_html += "<div class='result'><h2>Топ-10 ближайших карьеров</h2>"
         result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
         for item in top_distance:
-            result_html += "<tr><td>" + str(item["career"]) + "</td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item["sand_price"]) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
+            result_html += "<tr><td>" + str(item["career"]) + "</td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
         result_html += "</table></div>"
 
         result_html += "<div class='result'><h2>Топ-10 по цене</h2>"
         result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
         for item in top_price:
-            result_html += "<tr><td>" + str(item["career"]) + "</td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item["sand_price"]) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
+            result_html += "<tr><td>" + str(item["career"]) + "</td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
         result_html += "</table></div>"
 
     options = ""
