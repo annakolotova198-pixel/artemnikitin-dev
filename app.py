@@ -215,7 +215,7 @@ def home():
                 "total_sum": round(total_sale, 2),
                 "career_lat": float(row["Широта"]),
                 "career_lon": float(row["Долгота"]),
-                "career_address": reverse_geocode(row["Широта"], row["Долгота"])
+                "career_address": row.get("Адрес", "Адрес не указан")
             })
 
         if not routes:
