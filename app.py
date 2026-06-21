@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import json
 import math
+from urllib.parse import quote, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 
@@ -83,6 +84,7 @@ def home():
         "Любой материал / ближайший карьер",
         "Песок любой",
         "Щебень любой",
+        "Вторичный / рецикл щебень",
         "Смесь любая",
         "ГПС любая",
         "Отсев любой",
@@ -127,6 +129,8 @@ def home():
             filtered = df[df["Вид товара"].str.contains("песок", case=False, na=False)]
         elif sand_type == "Щебень любой":
             filtered = df[df["Вид товара"].str.contains("щебень", case=False, na=False)]
+        elif sand_type == "Вторичный / рецикл щебень":
+            filtered = df[df["Вид товара"].str.contains("вторич|рецикл|рециклинг|дроблен", case=False, na=False)]
         elif sand_type == "Смесь любая":
             filtered = df[df["Вид товара"].str.contains("смесь|щпс|с4|с5|с6|с/4|с/5|с/6", case=False, na=False)]
         elif sand_type == "ГПС любая":
@@ -310,13 +314,13 @@ def home():
         result_html += "<div class='result'><h2>Топ-30 ближайших карьеров</h2>"
         result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
         for item in top_distance:
-            result_html += "<tr><td>" + str(item["career"]) + "</td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
+            result_html += "<tr><td><a href=\"/career/" + quote(str(item["career"])) + "\" target=\"_blank\">" + str(item["career"]) + "</a></td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
         result_html += "</table></div>"
 
         result_html += "<div class='result'><h2>Топ-30 по цене</h2>"
         result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
         for item in top_price:
-            result_html += "<tr><td>" + str(item["career"]) + "</td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
+            result_html += "<tr><td><a href=\"/career/" + quote(str(item["career"])) + "\" target=\"_blank\">" + str(item["career"]) + "</a></td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
         result_html += "</table></div>"
 
     options = ""
@@ -347,7 +351,8 @@ def home():
     </head>
     <body>
         <div class="container">
-            <h1>Калькулятор доставки песка</h1>
+            <h1>Калькулятор доставки материалов</h1>
+            <p><a href="/careers" style="font-size:18px; font-weight:bold;">Список всех карьеров</a></p>
 
             <form method="POST" class="card">
                 <label>Адрес клиента</label>
@@ -425,6 +430,284 @@ def home():
     </body>
     </html>
     """
+
+
+
+def region_by_coords(lat, lon):
+    if lat >= 55.85 and lon < 37.8:
+        return "Север / Северо-Запад"
+    if lat >= 55.85 and lon >= 37.8:
+        return "Север / Северо-Восток"
+    if lat < 55.55 and lon < 37.8:
+        return "Юг / Юго-Запад"
+    if lat < 55.55 and lon >= 37.8:
+        return "Юг / Юго-Восток"
+    if lon < 37.4:
+        return "Запад"
+    if lon > 38.0:
+        return "Восток"
+    return "Москва / Ближнее МО"
+
+
+@app.route("/careers")
+def careers_list():
+    df = load_data()
+    group = request.args.get("group", "all")
+
+    def filter_group(data, group_name):
+        if group_name == "sand":
+            return data[data["Вид товара"].str.contains("песок", case=False, na=False)]
+        if group_name == "stone":
+            return data[data["Вид товара"].str.contains("щебень", case=False, na=False)]
+        if group_name == "recycled":
+            return data[data["Вид товара"].str.contains("вторич|рецикл|рециклинг|дроблен", case=False, na=False)]
+        if group_name == "mix":
+            return data[data["Вид товара"].str.contains("смесь|щпс|с4|с5|с6|с/4|с/5|с/6", case=False, na=False)]
+        if group_name == "gps":
+            return data[data["Вид товара"].str.contains("гпс|пгс|гравийно-песчан|песчано-гравий|щебеночно-песчано-гравий", case=False, na=False)]
+        if group_name == "screening":
+            return data[data["Вид товара"].str.contains("отсев", case=False, na=False)]
+        if group_name == "transfer":
+            return data[data["Вид товара"].str.contains("перевалка", case=False, na=False)]
+        return data
+
+    filtered = filter_group(df, group)
+
+    rows_html = ""
+    grouped = filtered.groupby("Название")
+
+    for career_name, career_df in grouped:
+        first = career_df.iloc[0]
+        products = "<ul>"
+        for _, row in career_df.iterrows():
+            price_text = str(row.get("Цена м3 текст", row["Цена м3"]))
+            products += f"<li>{row['Вид товара']} — {price_text} ₽/м³</li>"
+        products += "</ul>"
+
+        lat = float(first["Широта"])
+        lon = float(first["Долгота"])
+
+        map_link = f"https://yandex.ru/maps/?pt={lon},{lat}&z=13&l=map"
+
+        address = str(first.get("Адрес", "")).strip()
+        if address == "" or address.lower() == "nan":
+            address = f"{lat}, {lon}"
+
+        region = str(first.get("Регион", "")).strip()
+        if region == "" or region.lower() == "nan":
+            region = region_by_coords(lat, lon)
+
+        address_html = f"""
+            <a href="{map_link}" target="_blank"><b>{address}</b></a>
+            <br>
+            <span style="font-size:13px;color:#666;">{region}</span>
+        """
+
+        map_html = f"""
+        <a href="{map_link}" target="_blank" class="mini-map">
+            <div class="mini-map-box">
+                <div class="mini-pin">📍</div>
+                <div class="mini-map-text">Открыть карту</div>
+            </div>
+        </a>
+        """
+
+        rows_html += f"""
+        <tr>
+            <td><a href="/career/{quote(str(career_name))}" target="_blank"><b>{career_name}</b></a></td>
+            <td>{first.get("Юр лицо", "")}</td>
+            <td>{first.get("Телефон", "")}</td>
+            <td>{address_html}</td>
+            <td>{products}</td>
+            <td>{map_html}</td>
+        </tr>
+        """
+
+    tabs = [
+        ("all", "Все"),
+        ("sand", "Песок"),
+        ("stone", "Щебень"),
+        ("recycled", "Вторичный / рецикл щебень"),
+        ("mix", "Смеси"),
+        ("gps", "ГПС"),
+        ("screening", "Отсев"),
+        ("transfer", "Перевалка"),
+    ]
+
+    tabs_html = ""
+    for key, title in tabs:
+        style = "background:#111;color:white;" if group == key else "background:white;color:#111;"
+        tabs_html += f'<a href="/careers?group={key}" style="{style} padding:10px 14px; border-radius:10px; text-decoration:none; border:1px solid #ddd; margin-right:8px; display:inline-block; margin-bottom:8px;">{title}</a>'
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <title>Список всех карьеров</title>
+        <style>
+            body {{font-family: Arial, sans-serif; background:#f4f5f7; margin:0; padding:30px;}}
+            .container {{max-width:1400px; margin:auto;}}
+            .card {{background:white; padding:25px; border-radius:14px; margin-bottom:20px; box-shadow:0 4px 14px rgba(0,0,0,0.08);}}
+            table {{width:100%; border-collapse:collapse;}}
+            th, td {{border-bottom:1px solid #ddd; padding:12px; text-align:left; vertical-align:top;}}
+            li {{margin-bottom:6px;}}
+            a {{color:#111;}}
+            .mini-map {{
+                text-decoration: none;
+                display: block;
+            }}
+            .mini-map-box {{
+                width: 180px;
+                height: 120px;
+                border-radius: 12px;
+                background:
+                    linear-gradient(135deg, #eef2f3 0%, #dfe7ea 100%);
+                border: 1px solid #d4d4d4;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                color: #111;
+                box-shadow: inset 0 0 0 1px rgba(255,255,255,0.5);
+            }}
+            .mini-pin {{
+                font-size: 28px;
+                margin-bottom: 8px;
+            }}
+            .mini-map-text {{
+                font-size: 13px;
+                font-weight: bold;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <p><a href="/">← Назад к калькулятору</a></p>
+            <div class="card">
+                <h1>Список всех карьеров</h1>
+                <p>Всего карьеров в выборке: <b>{filtered['Название'].nunique()}</b></p>
+                <div>{tabs_html}</div>
+            </div>
+
+            <div class="card">
+                <table>
+                    <tr>
+                        <th>Карьер</th>
+                        <th>Юр лицо</th>
+                        <th>Телефон</th>
+                        <th>Адрес / регион</th>
+                        <th>Товары</th>
+                        <th>Карта</th>
+                    </tr>
+                    {rows_html}
+                </table>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+
+@app.route("/career/<path:career_name>")
+def career_page(career_name):
+    df = load_data()
+    career_name = unquote(career_name)
+
+    career_df = df[df["Название"].astype(str) == career_name]
+
+    if career_df.empty:
+        return "<h1>Карьер не найден</h1><p><a href='/'>Назад</a></p>"
+
+    first = career_df.iloc[0]
+
+    name = str(first["Название"])
+    legal = str(first.get("Юр лицо", ""))
+    phone = str(first.get("Телефон", ""))
+    lat = float(first["Широта"])
+    lon = float(first["Долгота"])
+    address = str(first.get("Адрес", "Адрес не указан"))
+
+    products_html = ""
+    for _, row in career_df.iterrows():
+        price_text = str(row.get("Цена м3 текст", row["Цена м3"]))
+        products_html += f"""
+            <tr>
+                <td>{row["Вид товара"]}</td>
+                <td>{price_text} ₽/м³</td>
+            </tr>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <title>{name}</title>
+        <script src="https://api-maps.yandex.ru/2.1/?apikey={YANDEX_API_KEY}&lang=ru_RU"></script>
+        <style>
+            body {{font-family: Arial, sans-serif; background: #f4f5f7; margin: 0; padding: 30px;}}
+            .container {{max-width: 1100px; margin: auto;}}
+            .card {{background: white; padding: 25px; border-radius: 14px; margin-bottom: 20px; box-shadow: 0 4px 14px rgba(0,0,0,0.08);}}
+            table {{width: 100%; border-collapse: collapse;}}
+            th, td {{border-bottom: 1px solid #ddd; padding: 10px; text-align: left;}}
+            #map {{width: 100%; height: 500px; border-radius: 14px; overflow: hidden;}}
+            a {{color: #111;}}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <p><a href="/">← Назад к калькулятору</a></p>
+
+            <div class="card">
+                <h1>{name}</h1>
+                <p><b>Юр лицо:</b> {legal}</p>
+                <p><b>Телефон:</b> {phone}</p>
+                <p><b>Адрес:</b> {address}</p>
+                <p><b>Координаты:</b> {lat}, {lon}</p>
+            </div>
+
+            <div class="card">
+                <h2>Товары на карьере</h2>
+                <table>
+                    <tr>
+                        <th>Товар</th>
+                        <th>Цена</th>
+                    </tr>
+                    {products_html}
+                </table>
+            </div>
+
+            <div class="card">
+                <h2>Карта</h2>
+                <div id="map"></div>
+            </div>
+        </div>
+
+        <script>
+            ymaps.ready(function () {{
+                var map = new ymaps.Map("map", {{
+                    center: [{lat}, {lon}],
+                    zoom: 12
+                }});
+
+                var placemark = new ymaps.Placemark(
+                    [{lat}, {lon}],
+                    {{
+                        balloonContent: "<b>{name}</b><br>{address}<br>{phone}"
+                    }},
+                    {{
+                        preset: "islands#redIcon"
+                    }}
+                );
+
+                map.geoObjects.add(placemark);
+            }});
+        </script>
+    </body>
+    </html>
+    """
+
 
 if __name__ == "__main__":
     app.run(debug=True)
