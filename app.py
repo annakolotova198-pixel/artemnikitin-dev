@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import json
 import math
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlencode
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 
@@ -283,6 +283,14 @@ def home():
 
         career_products = df[df["Название"] == best["career"]].sort_values("Цена м3")
 
+        transport_url_best = "/transport_request?" + urlencode({
+            "career": best["career"],
+            "client_address": address,
+            "client_lat": client_lat,
+            "client_lon": client_lon,
+            "distance": best["distance"]
+        })
+
         products_html = "<ul>"
         for _, product in career_products.iterrows():
             products_html += "<li>" + str(product["Вид товара"]) + " — " + str(product.get("Цена м3 текст", product["Цена м3"])) + " ₽/м³</li>"
@@ -291,6 +299,7 @@ def home():
         result_html += "<div class='result'>"
         result_html += "<h2>Лучший ближайший карьер</h2>"
         result_html += "<p><b>Карьер:</b> " + str(best["career"]) + "</p>"
+        result_html += "<p><a class='transport-btn' href='" + transport_url_best + "' target='_blank'>Оформить заявку на перевозку</a></p>"
         result_html += "<p><b>Юр лицо:</b> " + str(best["legal"]) + "</p>"
         result_html += "<p><b>Телефон:</b> " + str(best["phone"]) + "</p>"
         result_html += "<p><b>Адрес карьера:</b> " + str(best["career_address"]) + "</p>"
@@ -314,13 +323,27 @@ def home():
         result_html += "<div class='result'><h2>Топ-30 ближайших карьеров</h2>"
         result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
         for item in top_distance:
-            result_html += "<tr><td><a href=\"/career/" + quote(str(item["career"])) + "\" target=\"_blank\">" + str(item["career"]) + "</a></td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
+            transport_url_item = "/transport_request?" + urlencode({
+                "career": item["career"],
+                "client_address": address,
+                "client_lat": client_lat,
+                "client_lon": client_lon,
+                "distance": item["distance"]
+            })
+            result_html += "<tr><td><a href=\"/career/" + quote(str(item["career"])) + "\" target=\"_blank\">" + str(item["career"]) + "</a><br><a class='small-transport-btn' href='" + transport_url_item + "' target='_blank'>Заявка на перевозку</a></td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
         result_html += "</table></div>"
 
         result_html += "<div class='result'><h2>Топ-30 по цене</h2>"
         result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
         for item in top_price:
-            result_html += "<tr><td><a href=\"/career/" + quote(str(item["career"])) + "\" target=\"_blank\">" + str(item["career"]) + "</a></td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
+            transport_url_item = "/transport_request?" + urlencode({
+                "career": item["career"],
+                "client_address": address,
+                "client_lat": client_lat,
+                "client_lon": client_lon,
+                "distance": item["distance"]
+            })
+            result_html += "<tr><td><a href=\"/career/" + quote(str(item["career"])) + "\" target=\"_blank\">" + str(item["career"]) + "</a><br><a class='small-transport-btn' href='" + transport_url_item + "' target='_blank'>Заявка на перевозку</a></td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
         result_html += "</table></div>"
 
     options = ""
@@ -343,6 +366,8 @@ def home():
             .card, .result {background: white; padding: 25px; border-radius: 14px; margin-bottom: 20px; box-shadow: 0 4px 14px rgba(0,0,0,0.08);}
             input, select, button {width: 100%; padding: 14px; margin-top: 8px; margin-bottom: 18px; font-size: 16px; box-sizing: border-box;}
             button {background: #111; color: white; border: none; border-radius: 10px; cursor: pointer; font-size: 18px;}
+            .transport-btn {display:inline-block; background:#111; color:white; padding:12px 16px; border-radius:10px; text-decoration:none; font-weight:bold;}
+            .small-transport-btn {display:inline-block; margin-top:8px; background:#111; color:white; padding:7px 10px; border-radius:8px; text-decoration:none; font-size:13px;}
             table {width: 100%; border-collapse: collapse;}
             th, td {border-bottom: 1px solid #ddd; padding: 10px; text-align: left; vertical-align: top;}
             li {margin-bottom: 8px;}
@@ -447,6 +472,219 @@ def region_by_coords(lat, lon):
     if lon > 38.0:
         return "Восток"
     return "Москва / Ближнее МО"
+
+
+
+@app.route("/transport_request")
+def transport_request():
+    df = load_data()
+
+    career_name = request.args.get("career", "").strip()
+    client_address = request.args.get("client_address", "").strip()
+    client_lat = request.args.get("client_lat", "").strip()
+    client_lon = request.args.get("client_lon", "").strip()
+    distance = request.args.get("distance", "").strip()
+
+    career_df = df[df["Название"].astype(str) == career_name]
+
+    if career_df.empty:
+        return "<h1>Карьер не найден</h1><p><a href='/'>Назад</a></p>"
+
+    first = career_df.iloc[0]
+
+    career_lat = float(first["Широта"])
+    career_lon = float(first["Долгота"])
+
+    loading_address = str(first.get("Адрес", "")).strip()
+    if loading_address == "" or loading_address.lower() == "nan":
+        loading_address = reverse_geocode(career_lat, career_lon)
+
+    loading_coords = f"{career_lat}, {career_lon}"
+
+    unloading_coords = ""
+    if client_lat and client_lon:
+        unloading_coords = f"{client_lat}, {client_lon}"
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <title>Заявка на перевозку</title>
+        <style>
+            body {{font-family: Arial, sans-serif; background:#f4f5f7; margin:0; padding:30px;}}
+            .container {{max-width:1000px; margin:auto;}}
+            .card {{background:white; padding:25px; border-radius:14px; margin-bottom:20px; box-shadow:0 4px 14px rgba(0,0,0,0.08);}}
+            input, select, textarea, button {{width:100%; padding:13px; margin-top:7px; margin-bottom:15px; font-size:16px; box-sizing:border-box;}}
+            textarea {{height:220px;}}
+            button {{background:#111; color:white; border:none; border-radius:10px; cursor:pointer; font-size:18px;}}
+            .grid {{display:grid; grid-template-columns:1fr 1fr; gap:15px;}}
+            a {{color:#111;}}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <p><a href="/">← Назад к калькулятору</a></p>
+
+            <div class="card">
+                <h1>Заявка на перевозку</h1>
+                <p><b>Карьер:</b> {career_name}</p>
+                <p><b>Юр лицо:</b> {first.get("Юр лицо", "")}</p>
+                <p><b>Телефон карьера:</b> {first.get("Телефон", "")}</p>
+            </div>
+
+            <div class="card">
+                <label>Адрес загрузки</label>
+                <input id="loading_address" value="{loading_address}">
+
+                <label>Координаты загрузки</label>
+                <input id="loading_coords" value="{loading_coords}">
+
+                <label>Адрес выгрузки</label>
+                <input id="unloading_address" value="{client_address}">
+
+                <label>Координаты выгрузки</label>
+                <input id="unloading_coords" value="{unloading_coords}">
+
+                <label>Плечо, км</label>
+                <input id="distance" value="{distance}">
+
+                <label>Объем перевозки, м³</label>
+                <input id="volume" placeholder="Например: 100">
+
+                <label>Транспорт</label>
+                <select id="transport">
+                    <option>Транспорт любой</option>
+                    <option>Двухосные 10 м³</option>
+                    <option>Двухосные 18 м³</option>
+                    <option>Двухосные 20 м³</option>
+                    <option>Трехосные 25 м³</option>
+                    <option>Трехосные 30 м³</option>
+                    <option>Трехосные 35 м³</option>
+                    <option>Четырехосные 30 м³</option>
+                    <option>Четырехосные 35 м³</option>
+                    <option>Тонары</option>
+                </select>
+
+                <div class="grid">
+                    <div>
+                        <label>Время загрузки с</label>
+                        <input id="load_from" placeholder="Например: 09:00">
+                    </div>
+                    <div>
+                        <label>Время загрузки до</label>
+                        <input id="load_to" placeholder="Например: 12:00">
+                    </div>
+                </div>
+
+                <div class="grid">
+                    <div>
+                        <label>Время выгрузки с</label>
+                        <input id="unload_from" placeholder="Например: 10:00">
+                    </div>
+                    <div>
+                        <label>Время выгрузки до</label>
+                        <input id="unload_to" placeholder="Например: 14:00">
+                    </div>
+                </div>
+
+                <label>Оплата</label>
+                <select id="payment_type">
+                    <option>Оплата любая</option>
+                    <option>Наличными</option>
+                    <option>Безналичный расчет</option>
+                    <option>Безналичный расчет с НДС 22%</option>
+                    <option>Оплата любая по безналичному расчету</option>
+                    <option>Самозанятый</option>
+                    <option>ИП</option>
+                    <option>ООО</option>
+                </select>
+
+                <label>Вариант оплаты</label>
+                <select id="payment_terms">
+                    <option>Аванс</option>
+                    <option>День в день</option>
+                    <option>На следующий день</option>
+                    <option>В течение 3 дней после доставки</option>
+                    <option>В течение 5 дней после доставки</option>
+                    <option>В течение 10 дней после доставки</option>
+                </select>
+
+                <h2>Контакт по заявке</h2>
+
+                <label>Имя</label>
+                <input id="contact_name" placeholder="Например: Артём">
+
+                <label>Номер телефона</label>
+                <input id="contact_phone" placeholder="+7...">
+
+                <label>Почта</label>
+                <input id="contact_email" placeholder="example@mail.ru">
+
+                <button onclick="generateText()">Сформировать текст заявки</button>
+            </div>
+
+            <div class="card">
+                <h2>Текст заявки</h2>
+                <textarea id="result_text"></textarea>
+                <button onclick="copyText()">Скопировать заявку</button>
+            </div>
+        </div>
+
+        <script>
+            function val(id) {{
+                return document.getElementById(id).value;
+            }}
+
+            function generateText() {{
+                let text =
+`ЗАЯВКА НА ПЕРЕВОЗКУ
+
+Адрес загрузки:
+${{val("loading_address")}}
+
+Координаты загрузки:
+${{val("loading_coords")}}
+
+Адрес выгрузки:
+${{val("unloading_address")}}
+
+Координаты выгрузки:
+${{val("unloading_coords")}}
+
+Плечо:
+${{val("distance")}} км
+
+Транспорт:
+${{val("transport")}}
+
+Время загрузки:
+с ${{val("load_from")}} до ${{val("load_to")}}
+
+Время выгрузки:
+с ${{val("unload_from")}} до ${{val("unload_to")}}
+
+Оплата:
+${{val("payment_type")}}
+
+Вариант оплаты:
+${{val("payment_terms")}}`;
+
+                document.getElementById("result_text").value = text;
+            }}
+
+            function copyText() {{
+                let textArea = document.getElementById("result_text");
+                textArea.select();
+                document.execCommand("copy");
+                alert("Заявка скопирована");
+            }}
+
+            generateText();
+        </script>
+    </body>
+    </html>
+    """
 
 
 @app.route("/careers")
