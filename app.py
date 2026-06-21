@@ -516,6 +516,9 @@ def transport_request():
             .container {{max-width:1000px; margin:auto;}}
             .card {{background:white; padding:25px; border-radius:14px; margin-bottom:20px; box-shadow:0 4px 14px rgba(0,0,0,0.08);}}
             input, select, textarea, button {{width:100%; padding:13px; margin-top:7px; margin-bottom:15px; font-size:16px; box-sizing:border-box;}}
+            .checkbox-group {{display:grid; grid-template-columns:1fr 1fr; gap:8px 18px; margin:10px 0 18px;}}
+            .checkbox-group label {{background:#f4f5f7; padding:10px; border-radius:10px;}}
+            .checkbox-group input {{width:auto; margin-right:8px;}}
             textarea {{height:220px;}}
             button {{background:#111; color:white; border:none; border-radius:10px; cursor:pointer; font-size:18px;}}
             .grid {{display:grid; grid-template-columns:1fr 1fr; gap:15px;}}
@@ -553,18 +556,18 @@ def transport_request():
                 <input id="volume" placeholder="Например: 100">
 
                 <label>Транспорт</label>
-                <select id="transport">
-                    <option>Транспорт любой</option>
-                    <option>Двухосные 10 м³</option>
-                    <option>Двухосные 18 м³</option>
-                    <option>Двухосные 20 м³</option>
-                    <option>Трехосные 25 м³</option>
-                    <option>Трехосные 30 м³</option>
-                    <option>Трехосные 35 м³</option>
-                    <option>Четырехосные 30 м³</option>
-                    <option>Четырехосные 35 м³</option>
-                    <option>Тонары</option>
-                </select>
+                <div class="checkbox-group">
+                    <label><input type="checkbox" name="transport" value="Транспорт любой"> Транспорт любой</label>
+                    <label><input type="checkbox" name="transport" value="Двухосные 10 м³"> Двухосные 10 м³</label>
+                    <label><input type="checkbox" name="transport" value="Двухосные 18 м³"> Двухосные 18 м³</label>
+                    <label><input type="checkbox" name="transport" value="Двухосные 20 м³"> Двухосные 20 м³</label>
+                    <label><input type="checkbox" name="transport" value="Трехосные 25 м³"> Трехосные 25 м³</label>
+                    <label><input type="checkbox" name="transport" value="Трехосные 30 м³"> Трехосные 30 м³</label>
+                    <label><input type="checkbox" name="transport" value="Трехосные 35 м³"> Трехосные 35 м³</label>
+                    <label><input type="checkbox" name="transport" value="Четырехосные 30 м³"> Четырехосные 30 м³</label>
+                    <label><input type="checkbox" name="transport" value="Четырехосные 35 м³"> Четырехосные 35 м³</label>
+                    <label><input type="checkbox" name="transport" value="Тонары"> Тонары</label>
+                </div>
 
                 <div class="grid">
                     <div>
@@ -634,6 +637,14 @@ def transport_request():
         <script>
             function val(id) {{
                 return document.getElementById(id).value;
+            }}
+
+            function checkedValues(name) {{
+                let items = Array.from(document.querySelectorAll('input[name="' + name + '"]:checked'));
+                if (items.length === 0) {{
+                    return "Не выбрано";
+                }}
+                return items.map(i => i.value).join(", ");
             }}
 
             function generateText() {{
