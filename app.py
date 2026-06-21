@@ -264,8 +264,8 @@ def home():
         if not routes:
             return "<h1>Ошибка</h1><p>Не удалось построить маршрут.</p><a href='/'>Назад</a>"
 
-        top_distance = sorted(routes, key=lambda x: x["distance"])[:10]
-        top_price = sorted(routes, key=lambda x: x["total_price_m3"])[:10]
+        top_distance = sorted(routes, key=lambda x: x["distance"])[:30]
+        top_price = sorted(routes, key=lambda x: x["total_price_m3"])[:30]
         best = top_distance[0]
 
         route_data = {
@@ -307,13 +307,13 @@ def home():
         result_html += products_html
         result_html += "</div>"
 
-        result_html += "<div class='result'><h2>Топ-10 ближайших карьеров</h2>"
+        result_html += "<div class='result'><h2>Топ-30 ближайших карьеров</h2>"
         result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
         for item in top_distance:
             result_html += "<tr><td>" + str(item["career"]) + "</td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
         result_html += "</table></div>"
 
-        result_html += "<div class='result'><h2>Топ-10 по цене</h2>"
+        result_html += "<div class='result'><h2>Топ-30 по цене</h2>"
         result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
         for item in top_price:
             result_html += "<tr><td>" + str(item["career"]) + "</td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
