@@ -1,13 +1,18 @@
-from flask import Flask, request
+from crm_system import crm_bp
+from flask import Flask, request, session, redirect, url_for
 import pandas as pd
 import requests
 import json
+import sqlite3
+from functools import wraps
 import math
 from urllib.parse import quote, unquote, urlencode
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 
 app = Flask(__name__)
+app.register_blueprint(crm_bp)
+app.secret_key = "change-this-secret-key"
 
 YANDEX_API_KEY = "aaaac1c5-442b-4970-9bd9-1f1929227a78"
 CSV_FILE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSg5caW9yrTC7JLaz6YpYxH1WT20GyocPLToq_2tbvAktDz5yImYlF0z_C2xueHwk2F6l18xvKf3nKL/pub?output=csv"
@@ -377,7 +382,10 @@ def home():
     <body>
         <div class="container">
             <h1>Калькулятор доставки материалов</h1>
-            <p><a href="/careers" style="font-size:18px; font-weight:bold;">Список всех карьеров</a></p>
+            <p>
+                <a href="/careers" style="font-size:18px; font-weight:bold; margin-right:20px;">Список всех карьеров</a>
+                <a href="/office/login" style="font-size:18px; font-weight:bold;">CRM сделок</a>
+            </p>
 
             <form method="POST" class="card">
                 <label>Адрес клиента</label>
@@ -953,6 +961,444 @@ def career_page(career_name):
                 map.geoObjects.add(placemark);
             }});
         </script>
+    </body>
+    </html>
+    """
+
+
+
+CRM_USERS = {
+    "artem": "1234",
+    "manager1": "1234",
+    "manager2": "1234",
+}
+
+def init_crm_db():
+    conn = sqlite3.connect("crm.db")
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS deals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manager TEXT,
+            client TEXT,
+            material TEXT,
+            supplier TEXT,
+            purchase_sum TEXT,
+            logistics_sum TEXT,
+            client_sum TEXT,
+            production_date TEXT,
+            shipment_date TEXT,
+            contract_notes TEXT,
+            status TEXT DEFAULT 'В работе',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def money_to_float(value):
+    try:
+        value = str(value).replace(" ", "").replace(",", ".").replace("₽", "")
+        return float(value)
+    except:
+        return 0
+
+def calc_manager_commission(margin, scheme):
+    if margin <= 0:
+        return 0
+
+    if scheme == "simple":
+        if margin < 1_000_000:
+            return margin * 0.10
+        return margin * 0.20
+
+    # progressive
+    if margin < 100_000:
+        return 0
+    if margin < 200_000:
+        return margin * 0.10
+    if margin < 400_000:
+        return margin * 0.12
+    if margin < 600_000:
+        return margin * 0.14
+    if margin < 800_000:
+        return margin * 0.16
+    if margin < 1_000_000:
+        return margin * 0.18
+    return margin * 0.20
+
+def get_manager_scheme(manager):
+    conn = sqlite3.connect("crm.db")
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS manager_settings (
+            manager TEXT PRIMARY KEY,
+            scheme TEXT DEFAULT 'progressive'
+        )
+    """)
+    cur.execute("SELECT scheme FROM manager_settings WHERE manager=?", (manager,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else "progressive"
+
+
+def crm_login_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if "crm_user" not in session:
+            return redirect("/crm/login")
+        return func(*args, **kwargs)
+    return wrapper
+
+@app.route("/crm/login", methods=["GET", "POST"])
+def crm_login():
+    error = ""
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "").strip()
+
+        if CRM_USERS.get(username) == password:
+            session["crm_user"] = username
+            return redirect("/crm")
+        else:
+            error = "Неверный логин или пароль"
+
+    return f"""
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>CRM вход</title>
+        <style>
+            body {{font-family:Arial;background:#f4f5f7;padding:40px;}}
+            .card {{max-width:420px;margin:auto;background:white;padding:30px;border-radius:14px;box-shadow:0 4px 14px rgba(0,0,0,.08);}}
+            input,button {{width:100%;padding:14px;margin:10px 0;font-size:16px;box-sizing:border-box;}}
+            button {{background:#111;color:white;border:0;border-radius:10px;cursor:pointer;}}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>Вход в CRM</h1>
+            <form method="POST">
+                <input name="username" placeholder="Логин">
+                <input name="password" type="password" placeholder="Пароль">
+                <button>Войти</button>
+            </form>
+            <p style="color:red;">{error}</p>
+            <p><b>Тест:</b> artem / 1234</p>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.route("/crm/logout")
+def crm_logout():
+    session.pop("crm_user", None)
+    return redirect("/crm/login")
+
+@app.route("/crm")
+@crm_login_required
+def crm_dashboard():
+    init_crm_db()
+    user = session["crm_user"]
+
+    conn = sqlite3.connect("crm.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM deals WHERE manager=? ORDER BY id DESC", (user,))
+    deals = cur.fetchall()
+    conn.close()
+
+    scheme = get_manager_scheme(user)
+    total_margin = 0
+    total_commission = 0
+
+    rows = ""
+    for d in deals:
+        purchase = money_to_float(d['purchase_sum'])
+        logistics = money_to_float(d['logistics_sum'])
+        client_sum = money_to_float(d['client_sum'])
+
+        margin = client_sum - purchase - logistics
+        commission = calc_manager_commission(margin, scheme)
+
+        total_margin += margin
+        total_commission += commission
+
+        rows += f"""
+        <tr>
+            <td>{d['id']}</td>
+            <td><a href="/crm/deal/{d['id']}">{d['client']}</a></td>
+            <td>{d['material']}</td>
+            <td>{d['supplier']}</td>
+            <td>{client_sum:,.0f} ₽</td>
+            <td>{margin:,.0f} ₽</td>
+            <td>{commission:,.0f} ₽</td>
+            <td>{d['status']}</td>
+            <td>{d['created_at']}</td>
+        </tr>
+        """
+
+    return f"""
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>CRM</title>
+        <style>
+            body {{font-family:Arial;background:#f4f5f7;padding:30px;}}
+            .card {{background:white;padding:25px;border-radius:14px;margin-bottom:20px;box-shadow:0 4px 14px rgba(0,0,0,.08);}}
+            table {{width:100%;border-collapse:collapse;}}
+            th,td {{padding:12px;border-bottom:1px solid #ddd;text-align:left;}}
+            a.btn {{display:inline-block;background:#111;color:white;padding:12px 16px;border-radius:10px;text-decoration:none;}}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>CRM сделок</h1>
+            <p>Менеджер: <b>{user}</b></p>
+            <p><b>Схема мотивации:</b> {scheme}</p>
+            <p><b>Общая маржа:</b> {total_margin:,.0f} ₽</p>
+            <p><b>Заработок менеджера:</b> {total_commission:,.0f} ₽</p>
+            <a class="btn" href="/crm/deal/new">+ Новая сделка</a>
+            <a href="/crm/admin/commissions" style="margin-left:20px;">Настройки мотивации</a>
+            <a href="/crm/logout" style="margin-left:20px;">Выйти</a>
+        </div>
+
+        <div class="card">
+            <table>
+                <tr>
+                    <th>ID</th>
+                    <th>Клиент</th>
+                    <th>Материал</th>
+                    <th>Поставщик</th>
+                    <th>Сумма клиента</th>
+                    <th>Маржа</th>
+                    <th>Заработок менеджера</th>
+                    <th>Статус</th>
+                    <th>Создана</th>
+                </tr>
+                {rows}
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.route("/crm/deal/new", methods=["GET", "POST"])
+@crm_login_required
+def crm_new_deal():
+    init_crm_db()
+    user = session["crm_user"]
+
+    if request.method == "POST":
+        fields = [
+            "client", "material", "supplier", "purchase_sum", "logistics_sum",
+            "client_sum", "production_date", "shipment_date", "contract_notes", "status"
+        ]
+        values = [request.form.get(f, "") for f in fields]
+
+        conn = sqlite3.connect("crm.db")
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO deals (
+                manager, client, material, supplier, purchase_sum, logistics_sum,
+                client_sum, production_date, shipment_date, contract_notes, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [user] + values)
+        conn.commit()
+        conn.close()
+
+        return redirect("/crm")
+
+    return """
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Новая сделка</title>
+        <style>
+            body {font-family:Arial;background:#f4f5f7;padding:30px;}
+            .card {max-width:900px;margin:auto;background:white;padding:25px;border-radius:14px;box-shadow:0 4px 14px rgba(0,0,0,.08);}
+            input,textarea,select,button {width:100%;padding:13px;margin:8px 0 16px;font-size:16px;box-sizing:border-box;}
+            textarea {height:130px;}
+            button {background:#111;color:white;border:0;border-radius:10px;cursor:pointer;}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <p><a href="/crm">← Назад</a></p>
+            <h1>Новая сделка</h1>
+
+            <form method="POST">
+                <label>Клиент</label>
+                <input name="client">
+
+                <label>Материал</label>
+                <input name="material" placeholder="Песок, щебень, ПГС...">
+
+                <label>Поставщик / карьер</label>
+                <input name="supplier">
+
+                <label>Счет поставщика / закупка</label>
+                <input name="purchase_sum">
+
+                <label>Логистика / расходы</label>
+                <input name="logistics_sum">
+
+                <label>Счет клиенту / продажа</label>
+                <input name="client_sum">
+
+                <label>Дата производства</label>
+                <input name="production_date" type="date">
+
+                <label>Дата отгрузки</label>
+                <input name="shipment_date" type="date">
+
+                <label>Оценка договора / ключевые условия</label>
+                <textarea name="contract_notes" placeholder="НДС, предоплата, сроки, штрафы, риски..."></textarea>
+
+                <label>Статус</label>
+                <select name="status">
+                    <option>В работе</option>
+                    <option>Ожидаем оплату</option>
+                    <option>Оплачено клиентом</option>
+                    <option>Производство</option>
+                    <option>Отгрузка</option>
+                    <option>Закрыта</option>
+                </select>
+
+                <button>Создать сделку</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """
+
+
+@app.route("/crm/admin/commissions", methods=["GET", "POST"])
+@crm_login_required
+def crm_admin_commissions():
+    if session.get("crm_user") != "artem":
+        return "<h1>Доступ запрещён</h1><p><a href='/crm'>Назад</a></p>"
+
+    init_crm_db()
+
+    if request.method == "POST":
+        manager = request.form.get("manager", "")
+        scheme = request.form.get("scheme", "progressive")
+
+        conn = sqlite3.connect("crm.db")
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO manager_settings (manager, scheme)
+            VALUES (?, ?)
+            ON CONFLICT(manager) DO UPDATE SET scheme=excluded.scheme
+        """, (manager, scheme))
+        conn.commit()
+        conn.close()
+
+    conn = sqlite3.connect("crm.db")
+    cur = conn.cursor()
+    cur.execute("SELECT manager, scheme FROM manager_settings ORDER BY manager")
+    settings = cur.fetchall()
+    conn.close()
+
+    rows = ""
+    for manager, scheme in settings:
+        rows += f"<tr><td>{manager}</td><td>{scheme}</td></tr>"
+
+    options = ""
+    for manager in CRM_USERS.keys():
+        options += f"<option>{manager}</option>"
+
+    return f"""
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Настройки мотивации</title>
+        <style>
+            body {{font-family:Arial;background:#f4f5f7;padding:30px;}}
+            .card {{max-width:900px;margin:auto;background:white;padding:25px;border-radius:14px;box-shadow:0 4px 14px rgba(0,0,0,.08);}}
+            input,select,button {{width:100%;padding:13px;margin:8px 0 16px;font-size:16px;box-sizing:border-box;}}
+            button {{background:#111;color:white;border:0;border-radius:10px;cursor:pointer;}}
+            table {{width:100%;border-collapse:collapse;}}
+            th,td {{padding:12px;border-bottom:1px solid #ddd;text-align:left;}}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <p><a href="/crm">← Назад</a></p>
+            <h1>Настройки мотивации менеджеров</h1>
+
+            <form method="POST">
+                <label>Менеджер</label>
+                <select name="manager">{options}</select>
+
+                <label>Схема мотивации</label>
+                <select name="scheme">
+                    <option value="progressive">Прогрессивная: 0%, 10%, 12%, 14%, 16%, 18%, 20%</option>
+                    <option value="simple">Простая: до 1 млн — 10%, от 1 млн — 20%</option>
+                </select>
+
+                <button>Сохранить</button>
+            </form>
+
+            <h2>Текущие настройки</h2>
+            <table>
+                <tr><th>Менеджер</th><th>Схема</th></tr>
+                {rows}
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+
+
+@app.route("/crm/deal/<int:deal_id>")
+@crm_login_required
+def crm_deal_page(deal_id):
+    user = session["crm_user"]
+
+    conn = sqlite3.connect("crm.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM deals WHERE id=? AND manager=?", (deal_id, user))
+    d = cur.fetchone()
+    conn.close()
+
+    if not d:
+        return "<h1>Сделка не найдена</h1><p><a href='/crm'>Назад</a></p>"
+
+    return f"""
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Сделка #{d['id']}</title>
+        <style>
+            body {{font-family:Arial;background:#f4f5f7;padding:30px;}}
+            .card {{max-width:900px;margin:auto;background:white;padding:25px;border-radius:14px;box-shadow:0 4px 14px rgba(0,0,0,.08);}}
+            p {{font-size:17px;}}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <p><a href="/crm">← Назад</a></p>
+            <h1>Сделка #{d['id']}</h1>
+
+            <p><b>Клиент:</b> {d['client']}</p>
+            <p><b>Материал:</b> {d['material']}</p>
+            <p><b>Поставщик:</b> {d['supplier']}</p>
+            <p><b>Закупка:</b> {d['purchase_sum']}</p>
+            <p><b>Логистика:</b> {d['logistics_sum']}</p>
+            <p><b>Продажа клиенту:</b> {d['client_sum']}</p>
+            <p><b>Дата производства:</b> {d['production_date']}</p>
+            <p><b>Дата отгрузки:</b> {d['shipment_date']}</p>
+            <p><b>Статус:</b> {d['status']}</p>
+
+            <h2>Оценка договора / условия</h2>
+            <p>{d['contract_notes']}</p>
+        </div>
     </body>
     </html>
     """
