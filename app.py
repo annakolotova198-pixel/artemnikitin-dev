@@ -62,6 +62,36 @@ def get_route(start_lat, start_lon, end_lat, end_lon):
     except Exception:
         return None, None
 
+def material_group(material_name):
+    """Возвращает понятную пользователю группу материала."""
+    text = str(material_name or "").lower().replace("ё", "е")
+
+    if "песок" in text or "пескогрунт" in text:
+        if "очень мелк" in text or "тонк" in text or "0,7 - 1,0" in text or "0.7 - 1.0" in text:
+            return "Песок — тонкий"
+        if "мелк" in text or "1,0 - 1,5" in text or "1.0 - 1.5" in text or "1,5 - 2,0" in text or "1.5 - 2.0" in text:
+            return "Песок — мелкий"
+        if "средн" in text or "2,0 - 2,5" in text or "2.0 - 2.5" in text:
+            return "Песок — средний"
+        if "крупн" in text or "2,5 - 3,0" in text or "2.5 - 3.0" in text:
+            return "Песок — крупный"
+        return "Песок — крупность не указана"
+
+    if "вторич" in text or "рецикл" in text or "дроблен" in text:
+        return "Вторичный / рецикл щебень"
+    if "щебень" in text:
+        return "Щебень"
+    if "гпс" in text or "пгс" in text or "гравийно-песчан" in text or "песчано-гравий" in text:
+        return "ГПС / ПГС"
+    if "смесь" in text or "щпс" in text:
+        return "Смеси / ЩПС"
+    if "отсев" in text:
+        return "Отсев"
+    if "перевалка" in text:
+        return "Перевалка"
+    return "Другие материалы"
+
+
 def load_data():
     response = requests.get(CSV_FILE, timeout=20)
     response.encoding = "utf-8"
@@ -80,21 +110,30 @@ def load_data():
     df["Широта"] = pd.to_numeric(df["Широта"], errors="coerce")
     df["Долгота"] = pd.to_numeric(df["Долгота"], errors="coerce")
     df["Стоимость доставки руб_км_м3"] = pd.to_numeric(df["Стоимость доставки руб_км_м3"], errors="coerce")
-    return df.dropna(subset=["Название", "Юр лицо", "Вид товара", "Цена м3", "Широта", "Долгота", "Стоимость доставки руб_км_м3"])
+    df["Группа материала"] = df["Вид товара"].apply(material_group)
+    return df.dropna(subset=["Название", "Юр лицо", "Вид товара", "Цена м3", "Широта", "Долгота"])
 
 @app.route("/", methods=["GET", "POST"])
 def home():
     df = load_data()
-    sand_types = [
-        "Любой материал / ближайший карьер",
-        "Песок любой",
-        "Щебень любой",
+    preferred_groups = [
+        "Песок — тонкий",
+        "Песок — мелкий",
+        "Песок — средний",
+        "Песок — крупный",
+        "Песок — крупность не указана",
+        "Щебень",
         "Вторичный / рецикл щебень",
-        "Смесь любая",
-        "ГПС любая",
-        "Отсев любой",
-        "Перевалка"
-    ] + sorted(df["Вид товара"].dropna().unique())
+        "Смеси / ЩПС",
+        "ГПС / ПГС",
+        "Отсев",
+        "Перевалка",
+        "Другие материалы",
+    ]
+    available_groups = set(df["Группа материала"].dropna().unique())
+    sand_types = ["Любой материал / ближайший карьер"] + [
+        group for group in preferred_groups if group in available_groups
+    ]
 
     unique_careers = df.drop_duplicates(subset=["Название"])[["Название", "Широта", "Долгота", "Телефон"]]
     careers_for_map = []
@@ -130,22 +169,8 @@ def home():
 
         if sand_type == "Любой материал / ближайший карьер":
             filtered = df
-        elif sand_type == "Песок любой":
-            filtered = df[df["Вид товара"].str.contains("песок", case=False, na=False)]
-        elif sand_type == "Щебень любой":
-            filtered = df[df["Вид товара"].str.contains("щебень", case=False, na=False)]
-        elif sand_type == "Вторичный / рецикл щебень":
-            filtered = df[df["Вид товара"].str.contains("вторич|рецикл|рециклинг|дроблен", case=False, na=False)]
-        elif sand_type == "Смесь любая":
-            filtered = df[df["Вид товара"].str.contains("смесь|щпс|с4|с5|с6|с/4|с/5|с/6", case=False, na=False)]
-        elif sand_type == "ГПС любая":
-            filtered = df[df["Вид товара"].str.contains("гпс|пгс|гравийно-песчан|песчано-гравий|щебеночно-песчано-гравий", case=False, na=False)]
-        elif sand_type == "Отсев любой":
-            filtered = df[df["Вид товара"].str.contains("отсев", case=False, na=False)]
-        elif sand_type == "Перевалка":
-            filtered = df[df["Вид товара"].str.contains("перевалка", case=False, na=False)]
         else:
-            filtered = df[df["Вид товара"] == sand_type]
+            filtered = df[df["Группа материала"] == sand_type]
 
         routes = []
 
@@ -273,83 +298,124 @@ def home():
         if not routes:
             return "<h1>Ошибка</h1><p>Не удалось построить маршрут.</p><a href='/'>Назад</a>"
 
-        top_distance = sorted(routes, key=lambda x: x["distance"])[:30]
-        top_price = sorted(routes, key=lambda x: x["total_price_m3"])[:30]
-        best = top_distance[0]
+        # Одна группа соответствует одному карьеру. Все подходящие товары
+        # остаются внутри группы, поэтому карьер больше не повторяется в списке.
+        career_groups = {}
+        for item in routes:
+            group_key = (
+                str(item["career"]),
+                round(float(item["career_lat"]), 6),
+                round(float(item["career_lon"]), 6),
+            )
+            if group_key not in career_groups:
+                career_groups[group_key] = {
+                    "career": item["career"],
+                    "legal": item["legal"],
+                    "phone": item["phone"],
+                    "address": item["career_address"],
+                    "lat": item["career_lat"],
+                    "lon": item["career_lon"],
+                    "distance": item["distance"],
+                    "duration": item["duration"],
+                    "products": [],
+                }
+            career_groups[group_key]["products"].append(item)
+
+        grouped_careers = sorted(
+            career_groups.values(),
+            key=lambda group: (group["distance"], group["career"]),
+        )
+
+        nearest_group = grouped_careers[0]
+        best = min(
+            nearest_group["products"],
+            key=lambda item: item["total_price_m3"],
+        )
 
         route_data = {
             "client_lat": client_lat,
             "client_lon": client_lon,
-            "career_lat": best["career_lat"],
-            "career_lon": best["career_lon"],
+            "career_lat": nearest_group["lat"],
+            "career_lon": nearest_group["lon"],
             "client_address": address,
-            "career_name": best["career"]
+            "career_name": nearest_group["career"],
         }
 
-        career_products = df[df["Название"] == best["career"]].sort_values("Цена м3")
+        career_products = df[df["Название"] == nearest_group["career"]].copy()
+        career_products = career_products.sort_values(["Группа материала", "Цена м3"])
 
         transport_url_best = "/transport_request?" + urlencode({
-            "career": best["career"],
+            "career": nearest_group["career"],
             "client_address": address,
             "client_lat": client_lat,
             "client_lon": client_lon,
-            "distance": best["distance"]
+            "distance": nearest_group["distance"],
         })
 
-        products_html = "<ul>"
+        products_html = "<table class='products-table'>"
+        products_html += "<tr><th>Группа</th><th>Материал</th><th>Цена материала</th></tr>"
         for _, product in career_products.iterrows():
-            products_html += "<li>" + str(product["Вид товара"]) + " — " + str(product.get("Цена м3 текст", product["Цена м3"])) + " ₽/м³</li>"
-        products_html += "</ul>"
+            products_html += (
+                "<tr><td>" + str(product["Группа материала"]) + "</td><td>" +
+                str(product["Вид товара"]) + "</td><td>" +
+                str(product.get("Цена м3 текст", product["Цена м3"])) + " ₽/м³</td></tr>"
+            )
+        products_html += "</table>"
 
-        result_html += "<div class='result'>"
-        result_html += "<h2>Лучший ближайший карьер</h2>"
-        result_html += "<p><b>Карьер:</b> " + str(best["career"]) + "</p>"
-        result_html += "<p><a class='transport-btn' href='" + transport_url_best + "' target='_blank'>Оформить заявку на перевозку</a></p>"
-        result_html += "<p><b>Юр лицо:</b> " + str(best["legal"]) + "</p>"
-        result_html += "<p><b>Телефон:</b> " + str(best["phone"]) + "</p>"
-        result_html += "<p><b>Адрес карьера:</b> " + str(best["career_address"]) + "</p>"
-        result_html += "<p><b>Выбранный песок:</b> " + str(best["sand_type"]) + "</p>"
-        result_html += "<p><b>Расстояние:</b> " + str(best["distance"]) + " км</p>"
-        result_html += "<p><b>Время:</b> " + str(best["duration"]) + " мин</p>"
-        result_html += "<p><b>Цена материала:</b> " + str(best["sand_price_text"]) + " ₽/м³</p>"
-        result_html += "<p><b>Доставка перевозчик:</b> " + str(best["carrier_delivery_m3"]) + " ₽/м³</p>"
-        result_html += "<p><b>Доставка продажа:</b> " + str(best["sale_delivery_m3"]) + " ₽/м³</p>"
-        result_html += "<p><b>Цена закупки за 1 м³:</b> " + str(best["purchase_price_m3"]) + " ₽</p>"
-        result_html += "<p><b>Цена продажи за 1 м³:</b> " + str(best["sale_price_m3"]) + " ₽</p>"
-        result_html += "<p><b>Заработок за 1 м³:</b> " + str(best["profit_m3"]) + " ₽</p>"
-        
-        result_html += "<h2>Общая закупка: " + str(best["total_purchase"]) + " ₽</h2>"
-        result_html += "<h2>Общая продажа: " + str(best["total_sale"]) + " ₽</h2>"
-        result_html += "<h2>Общий заработок: " + str(best["total_profit"]) + " ₽</h2>"
-        result_html += "<h3>Все виды песка на этом карьере</h3>"
+        result_html += "<div class='result nearest-summary'>"
+        result_html += "<h2>Ближайший карьер</h2>"
+        result_html += "<p><b>Карьер:</b> " + str(nearest_group["career"]) + "</p>"
+        result_html += "<p><a class='transport-btn' href='" + transport_url_best + "'>Оформить заявку на перевозку</a></p>"
+        result_html += "<p><b>Юр. лицо:</b> " + str(nearest_group["legal"]) + "</p>"
+        result_html += "<p><b>Телефон:</b> " + str(nearest_group["phone"]) + "</p>"
+        result_html += "<p><b>Адрес:</b> " + str(nearest_group["address"]) + "</p>"
+        result_html += "<p><b>Расстояние:</b> " + str(nearest_group["distance"]) + " км</p>"
+        result_html += "<p><b>Время в пути:</b> " + str(nearest_group["duration"]) + " мин</p>"
+        result_html += "<p><b>Самое выгодное подходящее предложение:</b> " + str(best["sand_type"]) + " — " + str(best["total_price_m3"]) + " ₽/м³</p>"
+        result_html += "<h3>Все материалы этого карьера</h3>"
         result_html += products_html
         result_html += "</div>"
 
-        result_html += "<div class='result'><h2>Топ-30 ближайших карьеров</h2>"
-        result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
-        for item in top_distance:
-            transport_url_item = "/transport_request?" + urlencode({
-                "career": item["career"],
-                "client_address": address,
-                "client_lat": client_lat,
-                "client_lon": client_lon,
-                "distance": item["distance"]
-            })
-            result_html += "<tr><td><a href=\"/career/" + quote(str(item["career"])) + "\" target=\"_blank\">" + str(item["career"]) + "</a><br><a class='small-transport-btn' href='" + transport_url_item + "' target='_blank'>Заявка на перевозку</a></td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
-        result_html += "</table></div>"
+        total_offers = sum(len(group["products"]) for group in grouped_careers)
+        result_html += "<div class='result'>"
+        result_html += "<h2>Карьеры от ближайшего к дальнему</h2>"
+        result_html += "<p>Найдено карьеров: <b>" + str(len(grouped_careers)) + "</b>. Подходящих предложений: <b>" + str(total_offers) + "</b>.</p>"
+        result_html += "<p>Каждый карьер показан один раз. Внутри раскрыты все подходящие материалы.</p>"
+        result_html += "</div>"
 
-        result_html += "<div class='result'><h2>Топ-30 по цене</h2>"
-        result_html += "<table><tr><th>Карьер</th><th>Песок</th><th>Км</th><th>Мин</th><th>Цена песка</th><th>Итого ₽/м³</th></tr>"
-        for item in top_price:
-            transport_url_item = "/transport_request?" + urlencode({
-                "career": item["career"],
+        for position, group in enumerate(grouped_careers, start=1):
+            transport_url = "/transport_request?" + urlencode({
+                "career": group["career"],
                 "client_address": address,
                 "client_lat": client_lat,
                 "client_lon": client_lon,
-                "distance": item["distance"]
+                "distance": group["distance"],
             })
-            result_html += "<tr><td><a href=\"/career/" + quote(str(item["career"])) + "\" target=\"_blank\">" + str(item["career"]) + "</a><br><a class='small-transport-btn' href='" + transport_url_item + "' target='_blank'>Заявка на перевозку</a></td><td>" + str(item["sand_type"]) + "</td><td>" + str(item["distance"]) + "</td><td>" + str(item["duration"]) + "</td><td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td><td>" + str(item["total_price_m3"]) + "</td></tr>"
-        result_html += "</table></div>"
+            sorted_products = sorted(
+                group["products"],
+                key=lambda item: (material_group(item["sand_type"]), item["total_price_m3"]),
+            )
+            minimum_price = min(item["total_price_m3"] for item in sorted_products)
+
+            result_html += "<div class='result career-group'>"
+            result_html += "<div class='career-heading'>"
+            result_html += "<div><span class='position'>№" + str(position) + "</span> <a href=\"/career/" + quote(str(group["career"])) + "\"><b>" + str(group["career"]) + "</b></a></div>"
+            result_html += "<div class='distance-badge'>" + str(group["distance"]) + " км · " + str(group["duration"]) + " мин</div>"
+            result_html += "</div>"
+            result_html += "<p>Юр. лицо: " + str(group["legal"]) + " · Телефон: " + str(group["phone"]) + "</p>"
+            result_html += "<p>Минимальная итоговая цена: <b>" + str(minimum_price) + " ₽/м³</b> · <a class='small-transport-btn' href='" + transport_url + "'>Заявка на перевозку</a></p>"
+            result_html += "<div class='table-scroll'><table>"
+            result_html += "<tr><th>Группа</th><th>Материал</th><th>Материал ₽/м³</th><th>Доставка ₽/м³</th><th>Итого ₽/м³</th><th>Сумма за объем</th></tr>"
+            for item in sorted_products:
+                result_html += "<tr>"
+                result_html += "<td>" + material_group(item["sand_type"]) + "</td>"
+                result_html += "<td>" + str(item["sand_type"]) + "</td>"
+                result_html += "<td>" + str(item.get("sand_price_text", item["sand_price"])) + "</td>"
+                result_html += "<td>" + str(item["sale_delivery_m3"]) + "</td>"
+                result_html += "<td><b>" + str(item["total_price_m3"]) + "</b></td>"
+                result_html += "<td>" + str(item["total_sum"]) + " ₽</td>"
+                result_html += "</tr>"
+            result_html += "</table></div></div>"
 
     options = ""
     for sand in sand_types:
@@ -377,6 +443,18 @@ def home():
             th, td {border-bottom: 1px solid #ddd; padding: 10px; text-align: left; vertical-align: top;}
             li {margin-bottom: 8px;}
             #map {width: 100%; height: 520px; border-radius: 14px; overflow: hidden;}
+            .career-heading {display:flex; justify-content:space-between; gap:16px; align-items:center; font-size:20px;}
+            .position {display:inline-block; min-width:44px; color:#666;}
+            .distance-badge {background:#eef3ff; padding:8px 12px; border-radius:999px; white-space:nowrap; font-weight:bold;}
+            .table-scroll {overflow-x:auto;}
+            .products-table {margin-top:12px;}
+            @media (max-width: 700px) {
+                body {padding:14px;}
+                .card, .result {padding:16px;}
+                .career-heading {display:block;}
+                .distance-badge {display:inline-block; margin-top:10px;}
+                #map {height:360px;}
+            }
         </style>
     </head>
     <body>
@@ -674,8 +752,11 @@ ${{val("unloading_coords")}}
 Плечо:
 ${{val("distance")}} км
 
+Объем перевозки:
+${{val("volume")}} м³
+
 Транспорт:
-${{val("transport")}}
+${{checkedValues("transport")}}
 
 Время загрузки:
 с ${{val("load_from")}} до ${{val("load_to")}}
@@ -687,7 +768,13 @@ ${{val("transport")}}
 ${{val("payment_type")}}
 
 Вариант оплаты:
-${{val("payment_terms")}}`;
+${{val("payment_terms")}}
+Контактное лицо:
+${{val("contact_name")}}
+Телефон:
+${{val("contact_phone")}}
+Почта:
+${{val("contact_email")}}`;
 
                 document.getElementById("result_text").value = text;
             }}
