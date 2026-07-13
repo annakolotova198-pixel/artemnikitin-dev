@@ -116,8 +116,11 @@ def load_data():
         df["Телефон"] = df["Телефон"].fillna("").astype(str)
         df.loc[df["Телефон"].str.contains("#ERROR!", regex=False), "Телефон"] = "Не указан"
 
+    df["Юр лицо"] = df["Юр лицо"].fillna("").astype(str)
+    df.loc[df["Юр лицо"].str.strip() == "", "Юр лицо"] = "Не указано"
+
     df["Группа материала"] = df["Вид товара"].apply(material_group)
-    return df.dropna(subset=["Название", "Юр лицо", "Вид товара", "Цена м3", "Широта", "Долгота"])
+    return df.dropna(subset=["Название", "Вид товара", "Цена м3", "Широта", "Долгота"])
 
 @app.route("/", methods=["GET", "POST"])
 def home():
