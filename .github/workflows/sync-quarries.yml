@@ -1,0 +1,43 @@
+name: Sync quarry catalog
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: quarry-catalog-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          create_credentials_file: true
+          workload_identity_provider: projects/957551817483/locations/global/workloadIdentityPools/github-quarry-sync/providers/github-artemnikitin-dev
+          service_account: quarry-catalog-sync@quarry-catalog-artem-2026.iam.gserviceaccount.com
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Sync catalogue
+        env:
+          GOOGLE_SHEET_ID: 1Zb-38mYR63KCnI7JjTZGoedm9LGFZ3snfhoaYBMwuwo
+          SMETA_REQUEST_DELAY: "1.0"
+          FORCE_SYNC: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+        run: python parse_smeta.py
