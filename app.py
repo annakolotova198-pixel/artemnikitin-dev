@@ -97,7 +97,7 @@ def load_data():
     response.encoding = "utf-8"
     csv_text = response.text
     df = pd.read_csv(StringIO(csv_text))
-    df["Цена м3 текст"] = df["Цена м3"].astype(str)
+    df["Цена м3 текст"] = df["Цена м3"].where(df["Цена м3"].notna(), "По запросу").astype(str)
 
     df["Цена м3"] = (
         df["Цена м3"]
@@ -112,6 +112,10 @@ def load_data():
             df[numeric_column].astype(str).str.replace(",", ".", regex=False),
             errors="coerce",
         )
+    if "Телефон" in df.columns:
+        df["Телефон"] = df["Телефон"].fillna("").astype(str)
+        df.loc[df["Телефон"].str.contains("#ERROR!", regex=False), "Телефон"] = "Не указан"
+
     df["Группа материала"] = df["Вид товара"].apply(material_group)
     return df.dropna(subset=["Название", "Юр лицо", "Вид товара", "Цена м3", "Широта", "Долгота"])
 
