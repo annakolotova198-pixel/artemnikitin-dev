@@ -15,7 +15,7 @@ app.register_blueprint(crm_bp)
 app.secret_key = "change-this-secret-key"
 
 YANDEX_API_KEY = "aaaac1c5-442b-4970-9bd9-1f1929227a78"
-CSV_FILE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSg5caW9yrTC7JLaz6YpYxH1WT20GyocPLToq_2tbvAktDz5yImYlF0z_C2xueHwk2F6l18xvKf3nKL/pub?output=csv"
+CSV_FILE = "https://docs.google.com/spreadsheets/d/1Zb-38mYR63KCnI7JjTZGoedm9LGFZ3snfhoaYBMwuwo/export?format=csv&gid=0"
 
 def geocode_address(address):
     url = "https://geocode-maps.yandex.ru/1.x/"
