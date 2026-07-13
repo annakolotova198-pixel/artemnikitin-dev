@@ -18,6 +18,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from google.auth import default as google_auth_default
 from typing import Iterable
 from urllib.parse import urljoin, urlparse
 
@@ -296,7 +297,8 @@ class SmetaClient:
         return materials
 
 
-def sheet_client():
+from pathlib import Path
+from google.auth import default as google_auth_default():
     raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     if not raw:
         raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is required unless DRY_RUN=1")
