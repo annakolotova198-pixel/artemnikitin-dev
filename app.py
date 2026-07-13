@@ -107,9 +107,11 @@ def load_data():
         .str.replace("По запросу", "0", regex=False)
     )
     df["Цена м3"] = pd.to_numeric(df["Цена м3"], errors="coerce").fillna(0)
-    df["Широта"] = pd.to_numeric(df["Широта"], errors="coerce")
-    df["Долгота"] = pd.to_numeric(df["Долгота"], errors="coerce")
-    df["Стоимость доставки руб_км_м3"] = pd.to_numeric(df["Стоимость доставки руб_км_м3"], errors="coerce")
+    for numeric_column in ["Широта", "Долгота", "Стоимость доставки руб_км_м3"]:
+        df[numeric_column] = pd.to_numeric(
+            df[numeric_column].astype(str).str.replace(",", ".", regex=False),
+            errors="coerce",
+        )
     df["Группа материала"] = df["Вид товара"].apply(material_group)
     return df.dropna(subset=["Название", "Юр лицо", "Вид товара", "Цена м3", "Широта", "Долгота"])
 
