@@ -2,3 +2,7 @@ flask
 pandas
 requests
 gunicorn
+beautifulsoup4==4.13.4
+lxml==5.4.0
+gspread==6.2.1
+google-auth==2.40.3
