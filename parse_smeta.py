@@ -317,7 +317,7 @@ def worksheet(book, title: str, rows: int = 1000, cols: int = 20):
 
 def replace_sheet(ws, headers: list[str], rows: list[list[object]]) -> None:
     ws.clear()
-    ws.update([headers, *rows], "A1", value_input_option="USER_ENTERED")
+    ws.update([headers, *rows], "A1", value_input_option="RAW")
     ws.freeze(rows=1)
     ws.set_basic_filter(f"A1:{gspread.utils.rowcol_to_a1(max(1, len(rows) + 1), len(headers))}")
 
