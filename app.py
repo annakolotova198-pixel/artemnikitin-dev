@@ -9,6 +9,9 @@ import math
 from urllib.parse import quote, unquote, urlencode
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
+from html import escape
+import os
+import time
 
 app = Flask(__name__)
 app.register_blueprint(crm_bp)
@@ -16,6 +19,7 @@ app.secret_key = "change-this-secret-key"
 
 YANDEX_API_KEY = "aaaac1c5-442b-4970-9bd9-1f1929227a78"
 CSV_FILE = "https://docs.google.com/spreadsheets/d/1Zb-38mYR63KCnI7JjTZGoedm9LGFZ3snfhoaYBMwuwo/export?format=csv&gid=0"
+CARRIERS_FILE = os.path.join(os.path.dirname(__file__), "carriers.csv")
 
 def geocode_address(address):
     url = "https://geocode-maps.yandex.ru/1.x/"
@@ -92,6 +96,40 @@ def material_group(material_name):
     return "Другие материалы"
 
 
+MATERIAL_SELECTIONS = {
+    "Любой материал / ближайший карьер": None,
+    "Песок — любой": (
+        "Песок — тонкий",
+        "Песок — мелкий",
+        "Песок — средний",
+        "Песок — крупный",
+        "Песок — крупность не указана",
+    ),
+    "Песок — тонкий": ("Песок — тонкий",),
+    "Песок — мелкий": ("Песок — мелкий",),
+    "Песок — средний": ("Песок — средний",),
+    "Песок — крупный": ("Песок — крупный",),
+    "Песок — крупность не указана": ("Песок — крупность не указана",),
+    "Щебень — любой": ("Щебень", "Вторичный / рецикл щебень"),
+    "Щебень": ("Щебень",),
+    "Вторичный / рецикл щебень": ("Вторичный / рецикл щебень",),
+    "Смеси — любые": ("Смеси / ЩПС", "ГПС / ПГС"),
+    "Смеси / ЩПС": ("Смеси / ЩПС",),
+    "ГПС / ПГС": ("ГПС / ПГС",),
+    "Отсев": ("Отсев",),
+    "Перевалка": ("Перевалка",),
+    "Другие материалы": ("Другие материалы",),
+}
+
+
+def filter_material_selection(df, selection):
+    """Фильтрует предложения по точному виду или объединённой группе."""
+    groups = MATERIAL_SELECTIONS.get(selection)
+    if groups is None:
+        return df
+    return df[df["Группа материала"].isin(groups)]
+
+
 def load_data():
     response = requests.get(CSV_FILE, timeout=20)
     response.encoding = "utf-8"
@@ -125,24 +163,11 @@ def load_data():
 @app.route("/", methods=["GET", "POST"])
 def home():
     df = load_data()
-    preferred_groups = [
-        "Песок — тонкий",
-        "Песок — мелкий",
-        "Песок — средний",
-        "Песок — крупный",
-        "Песок — крупность не указана",
-        "Щебень",
-        "Вторичный / рецикл щебень",
-        "Смеси / ЩПС",
-        "ГПС / ПГС",
-        "Отсев",
-        "Перевалка",
-        "Другие материалы",
-    ]
     available_groups = set(df["Группа материала"].dropna().unique())
-    sand_types = ["Любой материал / ближайший карьер"] + [
-        group for group in preferred_groups if group in available_groups
-    ]
+    sand_types = []
+    for label, groups in MATERIAL_SELECTIONS.items():
+        if groups is None or any(group in available_groups for group in groups):
+            sand_types.append(label)
 
     unique_careers = df.drop_duplicates(subset=["Название"])[["Название", "Широта", "Долгота", "Телефон"]]
     careers_for_map = []
@@ -176,10 +201,7 @@ def home():
         if client_lat is None or client_lon is None:
             return "<h1>Ошибка</h1><p>Адрес не найден через Яндекс.</p><a href='/'>Назад</a>"
 
-        if sand_type == "Любой материал / ближайший карьер":
-            filtered = df
-        else:
-            filtered = df[df["Группа материала"] == sand_type]
+        filtered = filter_material_selection(df, sand_type)
 
         routes = []
 
@@ -471,13 +493,14 @@ def home():
             <h1>Калькулятор доставки материалов</h1>
             <p>
                 <a href="/careers" style="font-size:18px; font-weight:bold; margin-right:20px;">Список всех карьеров</a>
+                <a href="/carriers" style="font-size:18px; font-weight:bold; margin-right:20px;">Перевозчики</a>
                 <a href="/office/login" style="font-size:18px; font-weight:bold;">CRM сделок</a>
             </p>
 
             <form method="POST" class="card">
                 <label>Адрес клиента</label>
                 <input name="address" placeholder="Например: Москва, ул. Ленина 10" required>
-                <label>Вид песка</label>
+                <label>Материал</label>
                 <select name="sand_type" required>""" + options + """</select>
                 <label>Объем, м³</label>
                 <input name="volume" placeholder="Например: 20" required>
@@ -622,7 +645,7 @@ def transport_request():
     </head>
     <body>
         <div class="container">
-            <p><a href="/">← Назад к калькулятору</a></p>
+            <p><a href="/">← Назад к калькулятору</a> · <a href="/carriers">Перевозчики</a></p>
 
             <div class="card">
                 <h1>Заявка на перевозку</h1>
@@ -799,6 +822,180 @@ ${{val("contact_email")}}`;
         </script>
     </body>
     </html>
+    """
+
+
+def load_carriers():
+    """Читает очищенную локальную базу перевозчиков без превращения пустых полей в nan."""
+    if not os.path.exists(CARRIERS_FILE):
+        return pd.DataFrame()
+    carriers = pd.read_csv(CARRIERS_FILE, sep=";", dtype=str, keep_default_na=False)
+    carriers["profile_score"] = pd.to_numeric(carriers["profile_score"], errors="coerce").fillna(0)
+    return carriers
+
+
+def split_filter_values(series):
+    values = set()
+    for value in series.fillna("").astype(str):
+        values.update(part.strip() for part in value.split(";") if part.strip())
+    return sorted(values)
+
+
+def chips(value, empty_text="Не указано"):
+    parts = [part.strip() for part in str(value or "").split(";") if part.strip()]
+    if not parts:
+        return f'<span class="muted">{escape(empty_text)}</span>'
+    return "".join(f'<span class="chip">{escape(part)}</span>' for part in parts)
+
+
+@app.route("/carriers")
+def carriers_list():
+    carriers = load_carriers()
+    if carriers.empty:
+        return "<h1>База перевозчиков пока не загружена</h1><p><a href='/'>Назад</a></p>", 503
+
+    q = request.args.get("q", "").strip()
+    area = request.args.get("area", "").strip()
+    vehicle = request.args.get("vehicle", "").strip()
+    cargo = request.args.get("cargo", "").strip()
+    service = request.args.get("service", "").strip()
+    try:
+        page = max(int(request.args.get("page", "1") or 1), 1)
+    except (TypeError, ValueError):
+        page = 1
+    page_size = 50
+
+    all_areas = split_filter_values(carriers["areas"])
+    all_vehicles = split_filter_values(carriers["vehicles"])
+    all_cargo = split_filter_values(carriers["cargo"])
+    all_services = split_filter_values(carriers["services"])
+
+    filtered = carriers.copy()
+    if q:
+        search_text = filtered[["name", "inn", "phone", "email"]].fillna("").agg(" ".join, axis=1)
+        filtered = filtered[search_text.str.contains(q, case=False, regex=False)]
+    for column, value in [("areas", area), ("vehicles", vehicle), ("cargo", cargo), ("services", service)]:
+        if value:
+            filtered = filtered[filtered[column].str.contains(value, case=False, regex=False, na=False)]
+
+    filtered = filtered.sort_values(["profile_score", "name"], ascending=[False, True])
+    total = len(filtered)
+    page_count = max(math.ceil(total / page_size), 1)
+    page = min(page, page_count)
+    page_rows = filtered.iloc[(page - 1) * page_size:page * page_size]
+    check_timestamp = int(time.time() * 1000)
+
+    cards_html = ""
+    for _, row in page_rows.iterrows():
+        inn = str(row.get("inn", "")).strip()
+        phone = str(row.get("phone", "")).strip()
+        email = str(row.get("email", "")).strip()
+        fleet = str(row.get("fleet_size", "")).strip()
+        score = int(row.get("profile_score", 0))
+        inn_badge = '<span class="badge good">ИНН корректен</span>' if str(row.get("inn_valid", "")).lower() == "true" else '<span class="badge warn">ИНН не подтверждён</span>'
+        fns_link = ""
+        if inn:
+            fns_url = f"https://pb.nalog.ru/search.html#t={check_timestamp}&mode=search-all&queryAll={quote(inn)}&page=1&pageSize=10"
+            fns_link = f'<a href="{fns_url}" target="_blank" rel="noopener">Проверить статус в ФНС ↗</a>'
+        phone_html = "<br>".join(
+            f'<a href="tel:{escape(part.replace(" ", "").replace("-", ""))}">{escape(part)}</a>'
+            for part in phone.split("; ") if part
+        ) or '<span class="muted">Телефон не указан</span>'
+        email_html = "<br>".join(
+            f'<a href="mailto:{escape(part)}">{escape(part)}</a>'
+            for part in email.split("; ") if part
+        ) or '<span class="muted">E-mail не указан</span>'
+        fleet_html = f'<span class="chip strong">Автопарк: {escape(fleet)} ед.</span>' if fleet else ""
+        cards_html += f"""
+        <article class="carrier-card">
+            <div class="carrier-head">
+                <div>
+                    <h2>{escape(str(row.get("name", "Не указано")))}</h2>
+                    <div class="inn">ИНН: <b>{escape(inn or "не указан")}</b> · {escape(str(row.get("entity_type", "")))}</div>
+                </div>
+                <div class="score" title="Это полнота карточки, а не финансовый рейтинг">Карточка {score}%</div>
+            </div>
+            <div class="checks">{inn_badge} {fns_link}</div>
+            <div class="carrier-grid">
+                <section><h3>Контакты</h3>{phone_html}<br>{email_html}</section>
+                <section><h3>Где работает</h3>{chips(row.get("areas", ""), "Регион требует уточнения")}</section>
+                <section><h3>Транспорт</h3>{chips(row.get("vehicles", ""), "Тип машин требует уточнения")}{fleet_html}</section>
+                <section><h3>Грузы и услуги</h3>{chips(row.get("cargo", ""), "Грузы требуют уточнения")}{chips(row.get("services", ""), "")}</section>
+            </div>
+            <div class="status-line">Доступность: {escape(str(row.get("availability", "Не подтверждена")))} · исходная строка {escape(str(row.get("source_row", "")))}</div>
+        </article>
+        """
+
+    if not cards_html:
+        cards_html = '<div class="empty">По выбранным условиям перевозчики не найдены.</div>'
+
+    def select_options(values, selected, placeholder):
+        result = f'<option value="">{escape(placeholder)}</option>'
+        for value in values:
+            selected_attr = " selected" if value == selected else ""
+            result += f'<option value="{escape(value)}"{selected_attr}>{escape(value)}</option>'
+        return result
+
+    pagination = ""
+    base_params = {"q": q, "area": area, "vehicle": vehicle, "cargo": cargo, "service": service}
+    if page > 1:
+        pagination += f'<a href="/carriers?{urlencode({**base_params, "page": page - 1})}">← Предыдущая</a>'
+    pagination += f'<span>Страница {page} из {page_count}</span>'
+    if page < page_count:
+        pagination += f'<a href="/carriers?{urlencode({**base_params, "page": page + 1})}">Следующая →</a>'
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Перевозчики строительных грузов</title>
+        <style>
+            * {{box-sizing:border-box;}}
+            body {{font-family:Arial,sans-serif;background:#f4f5f7;margin:0;padding:28px;color:#151515;}}
+            .container {{max-width:1280px;margin:auto;}}
+            .panel,.carrier-card,.empty {{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 4px 16px rgba(0,0,0,.07);}}
+            .toplinks a {{margin-right:18px;font-weight:bold;}}
+            form {{display:grid;grid-template-columns:2fr repeat(4,1fr) auto;gap:10px;align-items:end;}}
+            label {{font-size:13px;font-weight:bold;display:block;margin-bottom:6px;}}
+            input,select,button {{width:100%;padding:11px;border:1px solid #ccd0d5;border-radius:9px;background:#fff;}}
+            button {{background:#111;color:#fff;border-color:#111;font-weight:bold;cursor:pointer;}}
+            a {{color:#151515;}}
+            .carrier-head {{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;}}
+            h1 {{margin-top:8px;}} h2 {{font-size:20px;margin:0 0 7px;}} h3 {{font-size:13px;text-transform:uppercase;color:#666;margin:0 0 9px;}}
+            .inn,.muted,.status-line {{color:#666;font-size:13px;}}
+            .score {{background:#eef3ff;padding:9px 12px;border-radius:999px;font-size:13px;font-weight:bold;white-space:nowrap;}}
+            .checks {{display:flex;gap:12px;align-items:center;margin:14px 0;}}
+            .badge,.chip {{display:inline-block;padding:5px 8px;border-radius:999px;font-size:12px;margin:0 5px 5px 0;background:#f0f1f3;}}
+            .badge.good {{background:#e7f7ed;color:#176b36;}} .badge.warn {{background:#fff1d6;color:#8a5b00;}} .chip.strong {{background:#e9f0ff;}}
+            .carrier-grid {{display:grid;grid-template-columns:1.1fr 1fr 1fr 1.3fr;gap:18px;border-top:1px solid #eee;padding-top:16px;}}
+            .carrier-grid section {{min-width:0;line-height:1.5;}}
+            .status-line {{border-top:1px solid #eee;margin-top:14px;padding-top:11px;}}
+            .pagination {{display:flex;justify-content:center;gap:20px;align-items:center;margin:24px 0;}}
+            .notice {{background:#fff9e8;border:1px solid #f1ddb0;padding:13px;border-radius:10px;line-height:1.45;}}
+            @media(max-width:1000px) {{form {{grid-template-columns:1fr 1fr;}} .carrier-grid {{grid-template-columns:1fr 1fr;}}}}
+            @media(max-width:650px) {{body {{padding:13px;}} form,.carrier-grid {{grid-template-columns:1fr;}} .carrier-head {{display:block;}} .score {{display:inline-block;margin-top:10px;}}}}
+        </style>
+    </head>
+    <body><div class="container">
+        <div class="panel">
+            <div class="toplinks"><a href="/">← Калькулятор</a><a href="/careers">Карьеры</a></div>
+            <h1>Перевозчики строительных грузов</h1>
+            <p>В базе: <b>{len(carriers)}</b>. Найдено по фильтрам: <b>{total}</b>.</p>
+            <p class="notice"><b>Важно:</b> отметка «ИНН корректен» означает только проверку контрольной суммы. Она не подтверждает действующий статус, отсутствие долгов или финансовую устойчивость. Для решения о сделке откройте карточку ФНС и бухгалтерскую отчётность на <a href="https://bo.nalog.gov.ru/" target="_blank" rel="noopener">ресурсе БФО ФНС ↗</a>.</p>
+            <form method="GET">
+                <div><label>Компания, ИНН или контакт</label><input name="q" value="{escape(q)}" placeholder="Например: 7716965531"></div>
+                <div><label>Направление</label><select name="area">{select_options(all_areas, area, "Любое")}</select></div>
+                <div><label>Машины</label><select name="vehicle">{select_options(all_vehicles, vehicle, "Любые")}</select></div>
+                <div><label>Груз</label><select name="cargo">{select_options(all_cargo, cargo, "Любой")}</select></div>
+                <div><label>Услуга</label><select name="service">{select_options(all_services, service, "Любая")}</select></div>
+                <div><button type="submit">Найти</button></div>
+            </form>
+        </div>
+        {cards_html}
+        <div class="pagination">{pagination}</div>
+    </div></body></html>
     """
 
 
