@@ -322,6 +322,77 @@ def replace_sheet(ws, headers: list[str], rows: list[list[object]]) -> None:
     ws.set_basic_filter(f"A1:{gspread.utils.rowcol_to_a1(max(1, len(rows) + 1), len(headers))}")
 
 
+LEGACY_SHEET_NAME = os.getenv("LEGACY_SHEET_NAME", "Архив_Карьеры_2026-07-13")
+
+
+def match_text(value: object, strip_quarry_prefix: bool = False) -> str:
+    text = clean(value).lower().replace("ё", "е")
+    if strip_quarry_prefix:
+        text = re.sub(r"^карьер\s+", "", text)
+    return re.sub(r"[^a-zа-я0-9]+", " ", text).strip()
+
+
+def match_coordinate(value: object) -> str:
+    try:
+        return f"{float(clean(value).replace(',', '.')):.3f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def read_legacy_compat_rows(book) -> list[list[object]]:
+    try:
+        ws = book.worksheet(LEGACY_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        logging.warning("Legacy worksheet %s was not found", LEGACY_SHEET_NAME)
+        return []
+    values = ws.get_all_values()
+    if not values:
+        return []
+    indexes = {clean(header): index for index, header in enumerate(values[0])}
+    if not all(header in indexes for header in COMPAT_HEADERS):
+        logging.warning("Legacy worksheet %s has incompatible headers", LEGACY_SHEET_NAME)
+        return []
+    rows: list[list[object]] = []
+    for source_row in values[1:]:
+        row = [source_row[indexes[header]] if indexes[header] < len(source_row) else "" for header in COMPAT_HEADERS]
+        if not clean(row[0]) or not clean(row[2]):
+            continue
+        rows.append(row)
+    return rows
+
+
+def merge_compat_rows(primary: list[list[object]], legacy: list[list[object]]) -> tuple[list[list[object]], int]:
+    merged = list(primary)
+    name_material: set[str] = set()
+    coordinate_material: set[str] = set()
+    for row in primary:
+        material = match_text(row[2])
+        name_material.add(f"{match_text(row[0], True)}|{material}")
+        lat, lon = match_coordinate(row[4]), match_coordinate(row[5])
+        if lat and lon:
+            coordinate_material.add(f"{lat}|{lon}|{material}")
+
+    added_keys: set[str] = set()
+    added = 0
+    for row in legacy:
+        material = match_text(row[2])
+        by_name = f"{match_text(row[0], True)}|{material}"
+        lat, lon = match_coordinate(row[4]), match_coordinate(row[5])
+        by_coordinate = f"{lat}|{lon}|{material}" if lat and lon else ""
+        if by_name in name_material or (by_coordinate and by_coordinate in coordinate_material):
+            continue
+        strong_key = by_coordinate or by_name
+        if not strong_key or strong_key in added_keys:
+            continue
+        added_keys.add(strong_key)
+        name_material.add(by_name)
+        if by_coordinate:
+            coordinate_material.add(by_coordinate)
+        merged.append(row)
+        added += 1
+    return merged, added
+
+
 def last_success_too_recent(log_ws) -> bool:
     if FORCE_SYNC:
         return False
@@ -413,6 +484,10 @@ def run() -> int:
             15,
         ] for m in materials]
 
+        legacy_rows = read_legacy_compat_rows(book)
+        compat_rows, legacy_added = merge_compat_rows(compat_rows, legacy_rows)
+        logging.info("Added %s unique legacy rows from %s", legacy_added, LEGACY_SHEET_NAME)
+
         replace_sheet(worksheet(book, "Объекты", cols=len(OBJECT_HEADERS)), OBJECT_HEADERS, object_rows)
         replace_sheet(worksheet(book, "Материалы_и_цены", cols=len(MATERIAL_HEADERS)), MATERIAL_HEADERS, material_rows)
         replace_sheet(worksheet(book, "Карьеры", cols=len(COMPAT_HEADERS)), COMPAT_HEADERS, compat_rows)
@@ -439,7 +514,7 @@ def run() -> int:
         finished = datetime.now(timezone.utc).isoformat()
         log_ws.append_row([
             started.isoformat(), finished, "Успешно", "smeta-n.ru", pages,
-            len(quarries), len(materials), len(new_history), len(material_rows), 0,
+            len(quarries), len(materials), len(new_history), len(compat_rows), 0,
             len(errors), "; ".join(errors[:10]),
         ], value_input_option="USER_ENTERED")
         return 0
