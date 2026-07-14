@@ -381,7 +381,22 @@ def home():
             "client_lat": client_lat,
             "client_lon": client_lon,
             "distance": nearest_group["distance"],
+            "material": best["sand_type"],
         })
+
+        recommended_carriers, route_region = recommend_carriers(
+            nearest_group["lat"],
+            nearest_group["lon"],
+            client_lat,
+            client_lon,
+            best["sand_type"],
+            limit=3,
+        )
+        carriers_html = render_carrier_recommendations(
+            recommended_carriers,
+            route_region,
+            compact=True,
+        )
 
         products_html = "<table class='products-table'>"
         products_html += "<tr><th>Группа</th><th>Материал</th><th>Цена материала</th></tr>"
@@ -403,6 +418,7 @@ def home():
         result_html += "<p><b>Расстояние:</b> " + str(nearest_group["distance"]) + " км</p>"
         result_html += "<p><b>Время в пути:</b> " + str(nearest_group["duration"]) + " мин</p>"
         result_html += "<p><b>Самое выгодное подходящее предложение:</b> " + str(best["sand_type"]) + " — " + str(best["total_price_m3"]) + " ₽/м³</p>"
+        result_html += carriers_html
         result_html += "<h3>Все материалы этого карьера</h3>"
         result_html += products_html
         result_html += "</div>"
@@ -421,6 +437,7 @@ def home():
                 "client_lat": client_lat,
                 "client_lon": client_lon,
                 "distance": group["distance"],
+                "material": min(group["products"], key=lambda item: item["total_price_m3"])["sand_type"],
             })
             sorted_products = sorted(
                 group["products"],
@@ -479,6 +496,14 @@ def home():
             .distance-badge {background:#eef3ff; padding:8px 12px; border-radius:999px; white-space:nowrap; font-weight:bold;}
             .table-scroll {overflow-x:auto;}
             .products-table {margin-top:12px;}
+            .carrier-recommendations {margin:20px 0 8px; padding:18px; border:1px solid #dbe4f4; border-radius:13px; background:#f7faff;}
+            .carrier-recommendations h3 {margin:0 0 6px;}
+            .carrier-recommendations .route-region {color:#526176; margin:0 0 13px;}
+            .recommended-carrier {background:#fff; border:1px solid #e1e5eb; border-radius:11px; padding:13px; margin-top:10px;}
+            .recommended-carrier-head {display:flex; justify-content:space-between; gap:12px; align-items:flex-start;}
+            .recommended-carrier .reason {color:#526176; font-size:13px; margin:7px 0;}
+            .recommended-carrier .details {font-size:14px; line-height:1.5;}
+            .carrier-score {white-space:nowrap; background:#e8f1ff; border-radius:999px; padding:5px 9px; font-size:12px; font-weight:bold;}
             @media (max-width: 700px) {
                 body {padding:14px;}
                 .card, .result {padding:16px;}
@@ -602,6 +627,7 @@ def transport_request():
     client_lat = request.args.get("client_lat", "").strip()
     client_lon = request.args.get("client_lon", "").strip()
     distance = request.args.get("distance", "").strip()
+    material = request.args.get("material", "").strip()
 
     career_df = df[df["Название"].astype(str) == career_name]
 
@@ -623,6 +649,26 @@ def transport_request():
     if client_lat and client_lon:
         unloading_coords = f"{client_lat}, {client_lon}"
 
+    recommended_carriers = []
+    route_region = {"loading": "Не определено", "unloading": "Не определено", "label": "Не определено"}
+    if client_lat and client_lon:
+        try:
+            recommended_carriers, route_region = recommend_carriers(
+                career_lat,
+                career_lon,
+                float(client_lat),
+                float(client_lon),
+                material,
+                limit=5,
+            )
+        except (TypeError, ValueError):
+            pass
+    carrier_recommendations_html = render_carrier_recommendations(
+        recommended_carriers,
+        route_region,
+        select_id="recommended_carrier",
+    )
+
     return f"""
     <!DOCTYPE html>
     <html lang="ru">
@@ -641,6 +687,13 @@ def transport_request():
             button {{background:#111; color:white; border:none; border-radius:10px; cursor:pointer; font-size:18px;}}
             .grid {{display:grid; grid-template-columns:1fr 1fr; gap:15px;}}
             a {{color:#111;}}
+            .carrier-recommendations {{background:#f7faff; border:1px solid #dbe4f4; border-radius:14px; padding:20px; margin-bottom:20px;}}
+            .carrier-recommendations h3 {{margin-top:0;}}
+            .route-region,.reason {{color:#526176;}}
+            .recommended-carrier {{background:#fff; border:1px solid #e1e5eb; border-radius:11px; padding:13px; margin-top:10px;}}
+            .recommended-carrier-head {{display:flex; justify-content:space-between; gap:12px;}}
+            .carrier-score {{white-space:nowrap; background:#e8f1ff; border-radius:999px; padding:5px 9px; font-size:12px; font-weight:bold;}}
+            .details {{font-size:14px; line-height:1.5;}}
         </style>
     </head>
     <body>
@@ -652,7 +705,10 @@ def transport_request():
                 <p><b>Карьер:</b> {career_name}</p>
                 <p><b>Юр лицо:</b> {first.get("Юр лицо", "")}</p>
                 <p><b>Телефон карьера:</b> {first.get("Телефон", "")}</p>
+                <p><b>Материал:</b> {escape(material or "Не выбран")}</p>
             </div>
+
+            {carrier_recommendations_html}
 
             <div class="card">
                 <label>Адрес загрузки</label>
@@ -754,7 +810,8 @@ def transport_request():
 
         <script>
             function val(id) {{
-                return document.getElementById(id).value;
+                const element = document.getElementById(id);
+                return element ? element.value : "Не выбран";
             }}
 
             function checkedValues(name) {{
@@ -783,6 +840,12 @@ ${{val("unloading_coords")}}
 
 Плечо:
 ${{val("distance")}} км
+
+Направление маршрута:
+{route_region["label"]}
+
+Рекомендуемый перевозчик:
+${{val("recommended_carrier")}}
 
 Объем перевозки:
 ${{val("volume")}} м³
@@ -846,6 +909,211 @@ def chips(value, empty_text="Не указано"):
     if not parts:
         return f'<span class="muted">{escape(empty_text)}</span>'
     return "".join(f'<span class="chip">{escape(part)}</span>' for part in parts)
+
+
+DIRECTION_ALIASES = {
+    "Север": ("север", "дмитров", "химки", "сходн", "зеленоград", "лобня", "долгопруд"),
+    "Юг": ("юг", "домодед", "подольск", "видное", "ленинск", "чехов", "ступино"),
+    "Запад": ("запад", "одинцов", "красногор", "истра", "можайск", "наро-фомин"),
+    "Восток": ("восток", "балаших", "ногинск", "электросталь", "щелков", "щёлков"),
+    "Юго-Восток": ("юго-вост", "люберц", "раменск", "жуковск", "воскресенск"),
+    "Юго-Запад": ("юго-запад", "троицк", "новая москва"),
+    "Северо-Восток": ("северо-вост", "мытищ", "королев", "королёв", "пушкино"),
+    "Северо-Запад": ("северо-запад", "солнечногор", "клин"),
+}
+
+GLOBAL_AREA_MARKERS = (
+    "москва и московская область",
+    "москва и мо",
+    "московская область",
+    "вся москва",
+    "вся область",
+    "по всей москве",
+)
+
+
+def direction_by_coords(lat, lon):
+    """Возвращает основной сектор относительно центра Москвы для подбора перевозчиков."""
+    lat = float(lat)
+    lon = float(lon)
+    center_lat, center_lon = 55.7558, 37.6176
+    north_south = "Север" if lat >= center_lat else "Юг"
+    east_west = "Восток" if lon >= center_lon else "Запад"
+
+    # Если отклонение по одной оси заметно больше, используем понятное основное направление.
+    lat_delta = abs(lat - center_lat)
+    lon_delta = abs(lon - center_lon) * 0.57
+    if lat_delta > lon_delta * 1.8:
+        return north_south
+    if lon_delta > lat_delta * 1.8:
+        return east_west
+    diagonals = {
+        ("Север", "Восток"): "Северо-Восток",
+        ("Север", "Запад"): "Северо-Запад",
+        ("Юг", "Восток"): "Юго-Восток",
+        ("Юг", "Запад"): "Юго-Запад",
+    }
+    return diagonals[(north_south, east_west)]
+
+
+def route_region_info(career_lat, career_lon, client_lat, client_lon):
+    loading = direction_by_coords(career_lat, career_lon)
+    unloading = direction_by_coords(client_lat, client_lon)
+    label = loading if loading == unloading else f"{loading} → {unloading}"
+    return {
+        "loading": loading,
+        "unloading": unloading,
+        "label": label,
+    }
+
+
+def carrier_area_directions(areas):
+    text = str(areas or "").lower().replace("ё", "е")
+    directions = set()
+    for direction, aliases in DIRECTION_ALIASES.items():
+        normalized_aliases = tuple(alias.replace("ё", "е") for alias in aliases)
+        if any(alias in text for alias in normalized_aliases):
+            directions.add(direction)
+            if direction.startswith("Северо-"):
+                directions.add("Север")
+            if direction.startswith("Юго-"):
+                directions.add("Юг")
+            if direction.endswith("Восток"):
+                directions.add("Восток")
+            if direction.endswith("Запад"):
+                directions.add("Запад")
+    global_area = any(marker in text for marker in GLOBAL_AREA_MARKERS)
+    return directions, global_area
+
+
+def material_matches_cargo(material, cargo):
+    material_text = str(material or "").lower().replace("ё", "е")
+    cargo_text = str(cargo or "").lower().replace("ё", "е")
+    if not cargo_text:
+        return False
+    categories = {
+        "песок": ("песок", "пескогрунт"),
+        "щебень": ("щебень", "вторич", "рецикл"),
+        "грунт": ("грунт", "почв"),
+        "смесь": ("смесь", "щпс", "пгс", "гпс"),
+        "отсев": ("отсев",),
+    }
+    for category, aliases in categories.items():
+        if any(alias in material_text for alias in aliases):
+            return category in cargo_text or any(alias in cargo_text for alias in aliases)
+    return False
+
+
+def recommend_carriers(career_lat, career_lon, client_lat, client_lon, material="", limit=5):
+    """Ранжирует перевозчиков по маршруту, грузу и полноте доступной карточки."""
+    route_region = route_region_info(career_lat, career_lon, client_lat, client_lon)
+    carriers = load_carriers()
+    if carriers.empty:
+        return [], route_region
+
+    results = []
+    for _, row in carriers.iterrows():
+        areas = str(row.get("areas", "")).strip()
+        directions, global_area = carrier_area_directions(areas)
+        loading_match = route_region["loading"] in directions
+        unloading_match = route_region["unloading"] in directions
+        regional_match = loading_match or unloading_match or global_area
+
+        # Сначала предлагаем тех, кто явно работает хотя бы на одном конце маршрута.
+        if not regional_match:
+            continue
+
+        profile_score = float(row.get("profile_score", 0) or 0)
+        score = profile_score * 0.35
+        reasons = []
+        if loading_match and unloading_match:
+            score += 42
+            reasons.append("работает на всём направлении маршрута")
+        elif unloading_match:
+            score += 32
+            reasons.append("работает в районе выгрузки")
+        elif loading_match:
+            score += 25
+            reasons.append("работает в районе карьера")
+        if global_area:
+            score += 18
+            reasons.append("заявлена работа по Москве и Московской области")
+        if material_matches_cargo(material, row.get("cargo", "")):
+            score += 16
+            reasons.append("в списке грузов есть подходящий материал")
+        if str(row.get("vehicles", "")).strip():
+            score += 6
+            reasons.append("указаны типы машин")
+        if str(row.get("fleet_size", "")).strip():
+            score += 6
+            reasons.append("указан размер автопарка")
+        if str(row.get("phone", "")).strip():
+            score += 4
+        if str(row.get("inn_valid", "")).lower() == "true":
+            score += 3
+
+        carrier = row.to_dict()
+        carrier["recommendation_score"] = round(score, 1)
+        carrier["match_reason"] = "; ".join(reasons)
+        results.append(carrier)
+
+    results.sort(key=lambda row: (-row["recommendation_score"], str(row.get("name", ""))))
+    return results[:limit], route_region
+
+
+def render_carrier_recommendations(carriers, route_region, compact=False, select_id=None):
+    route_label = escape(route_region["label"])
+    if not carriers:
+        return (
+            '<section class="carrier-recommendations">'
+            '<h3>Перевозчики для маршрута</h3>'
+            f'<p class="route-region">Направление: <b>{route_label}</b></p>'
+            '<p>В базе нет перевозчика с подтверждённой работой на этом направлении. '
+            '<a href="/carriers">Открыть всю базу и уточнить регион вручную</a>.</p>'
+            '</section>'
+        )
+
+    cards = []
+    options = []
+    for index, row in enumerate(carriers, start=1):
+        name = escape(str(row.get("name", "Не указано")))
+        phone = escape(str(row.get("phone", "Не указан")) or "Не указан")
+        areas = escape(str(row.get("areas", "Требует уточнения")) or "Требует уточнения")
+        vehicles = escape(str(row.get("vehicles", "Требует уточнения")) or "Требует уточнения")
+        fleet = escape(str(row.get("fleet_size", "")))
+        cargo = escape(str(row.get("cargo", "Требует уточнения")) or "Требует уточнения")
+        reason = escape(str(row.get("match_reason", "")))
+        score = row.get("recommendation_score", 0)
+        fleet_text = f" · автопарк: {fleet}" if fleet else ""
+        cards.append(
+            '<article class="recommended-carrier">'
+            '<div class="recommended-carrier-head">'
+            f'<b>№{index} {name}</b><span class="carrier-score">совпадение {score}</span>'
+            '</div>'
+            f'<div class="reason">Почему: {reason}</div>'
+            f'<div class="details"><b>Регион:</b> {areas}<br><b>Телефон:</b> {phone}<br>'
+            f'<b>Транспорт:</b> {vehicles}{fleet_text}<br><b>Грузы:</b> {cargo}</div>'
+            '</article>'
+        )
+        options.append(f'<option value="{name}">{name} — {areas}</option>')
+
+    select_html = ""
+    if select_id:
+        select_html = (
+            f'<label for="{escape(select_id)}">Рекомендуемый перевозчик</label>'
+            f'<select id="{escape(select_id)}"><option value="Не выбран">Не выбран</option>{"".join(options)}</select>'
+        )
+
+    extra_class = " compact" if compact else ""
+    return (
+        f'<section class="carrier-recommendations{extra_class}">'
+        '<h3>Рекомендуемые перевозчики</h3>'
+        f'<p class="route-region">Направление маршрута: <b>{route_label}</b>. '
+        'Рейтинг — это совпадение с маршрутом и данными карточки, а не гарантия доступности машины.</p>'
+        f'{select_html}{"".join(cards)}'
+        '<p><a href="/carriers">Посмотреть всю базу перевозчиков →</a></p>'
+        '</section>'
+    )
 
 
 @app.route("/carriers")
