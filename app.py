@@ -1014,6 +1014,17 @@ def recommend_carriers(career_lat, career_lon, client_lat, client_lon, material=
     results = []
     for _, row in carriers.iterrows():
         areas = str(row.get("areas", "")).strip()
+        cargo = str(row.get("cargo", "")).strip()
+        services = str(row.get("services", "")).strip()
+        cargo_match = material_matches_cargo(material, cargo)
+
+        # Если профиль явно противоречит заявке, не выдаём его как рекомендацию.
+        # Пустые поля не исключаем, но показываем пользователю как требующие уточнения.
+        if material and cargo and not cargo_match:
+            continue
+        if services and "перевоз" not in services.lower() and "самовывоз" not in services.lower():
+            continue
+
         directions, global_area = carrier_area_directions(areas)
         loading_match = route_region["loading"] in directions
         unloading_match = route_region["unloading"] in directions
@@ -1038,7 +1049,7 @@ def recommend_carriers(career_lat, career_lon, client_lat, client_lon, material=
         if global_area:
             score += 18
             reasons.append("заявлена работа по Москве и Московской области")
-        if material_matches_cargo(material, row.get("cargo", "")):
+        if cargo_match:
             score += 16
             reasons.append("в списке грузов есть подходящий материал")
         if str(row.get("vehicles", "")).strip():
