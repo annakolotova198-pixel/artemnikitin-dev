@@ -228,8 +228,12 @@ def build_quote(cart, product_by_id, delivery_rows, lat, lon, markup, vehicle_ov
             "weight_total_kg": product["weight_kg"] * quantity,
             "volume_total_m3": dimensions["volume_m3"] * quantity,
             "purchase_total": product["price_rub"] * quantity,
-            "sale_unit": product["price_rub"] * (1 + markup / 100),
-            "sale_total": product["price_rub"] * quantity * (1 + markup / 100),
+            "delivery_share_total": 0,
+            "delivery_unit": 0,
+            "purchase_with_delivery_unit": product["price_rub"],
+            "purchase_with_delivery_total": product["price_rub"] * quantity,
+            "client_unit": product["price_rub"] * (1 + markup / 100),
+            "client_line_total": product["price_rub"] * quantity * (1 + markup / 100),
         })
         supplier_lines[product["supplier"]].append(line)
         all_lines.append(line)
@@ -258,17 +262,40 @@ def build_quote(cart, product_by_id, delivery_rows, lat, lon, markup, vehicle_ov
             **calculation,
         })
 
+        supplier_weight = sum(line["weight_total_kg"] for line in lines)
+        supplier_quantity = sum(line["quantity"] for line in lines)
+        for line in lines:
+            if supplier_weight > 0:
+                delivery_ratio = line["weight_total_kg"] / supplier_weight
+            else:
+                delivery_ratio = line["quantity"] / supplier_quantity
+            line["delivery_share_total"] = calculation["delivery_total"] * delivery_ratio
+            line["delivery_unit"] = line["delivery_share_total"] / line["quantity"]
+            line["purchase_with_delivery_unit"] = line["price_rub"] + line["delivery_unit"]
+            line["purchase_with_delivery_total"] = line["purchase_with_delivery_unit"] * line["quantity"]
+            line["client_unit"] = line["purchase_with_delivery_unit"] * (1 + markup / 100)
+            line["client_line_total"] = line["client_unit"] * line["quantity"]
+            minimum_per_trip = line["quantity"] // calculation["trips"]
+            maximum_per_trip = math.ceil(line["quantity"] / calculation["trips"])
+            if minimum_per_trip == maximum_per_trip:
+                line["quantity_per_trip"] = f"{maximum_per_trip} шт."
+            elif minimum_per_trip == 0:
+                line["quantity_per_trip"] = f"до {maximum_per_trip} шт."
+            else:
+                line["quantity_per_trip"] = f"{minimum_per_trip}–{maximum_per_trip} шт."
+
     purchase_total = sum(line["purchase_total"] for line in all_lines)
-    sale_total = sum(line["sale_total"] for line in all_lines)
     delivery_total = sum(item["delivery_total"] for item in deliveries)
+    purchase_with_delivery_total = sum(line["purchase_with_delivery_total"] for line in all_lines)
+    client_total = sum(line["client_line_total"] for line in all_lines)
     return {
         "lines": all_lines,
         "deliveries": deliveries,
         "errors": errors,
         "purchase_total": purchase_total,
-        "sale_total": sale_total,
+        "purchase_with_delivery_total": purchase_with_delivery_total,
         "delivery_total": delivery_total,
-        "client_total": sale_total + delivery_total,
+        "client_total": client_total,
         "weight_total_kg": sum(line["weight_total_kg"] for line in all_lines),
         "volume_total_m3": sum(line["volume_total_m3"] for line in all_lines),
     }
@@ -279,27 +306,27 @@ PAGE = r"""
 <title>Калькулятор заявки ЖБИ</title>
 <style>
 :root{--ink:#18202a;--muted:#647184;--blue:#185bd8;--line:#dce3ec;--bg:#f3f6fa;--ok:#e9f8ef;--danger:#a62d2d}
-*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1380px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}.span4{grid-column:span 4}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.remove{background:#fff;color:var(--danger);border-color:#e6bcbc;padding:7px;min-height:34px}.hint,.muted{color:var(--muted);font-size:13px}.suggestions{max-height:360px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px}.suggestion{display:block;width:100%;min-height:0;padding:10px 12px;background:#fff;color:var(--ink);text-align:left;border:0;border-bottom:1px solid #edf0f4;border-radius:0;cursor:pointer}.suggestion:hover,.suggestion.selected{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px;font-weight:400}.list-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:7px}.transport-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.transport-choice{padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8faff}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:#fff6df;border:1px solid #f0d58a}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{background:#f5f8fc;border-radius:12px;padding:14px}.kpi b{display:block;font-size:22px;margin-top:4px}.delivery{border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:12px}.badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1;vertical-align:top}th{font-size:12px;color:var(--muted)}.money{font-weight:800;white-space:nowrap}.empty{text-align:center;color:var(--muted);padding:24px}.actions{display:flex;gap:10px;align-items:end}.actions>*{flex:1}
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1380px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}.span4{grid-column:span 4}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.remove{background:#fff;color:var(--danger);border-color:#e6bcbc;padding:7px;min-height:34px}.hint,.muted{color:var(--muted);font-size:13px}.suggestions{max-height:360px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px}.suggestion{display:block;width:100%;min-height:0;padding:10px 12px;background:#fff;color:var(--ink);text-align:left;border:0;border-bottom:1px solid #edf0f4;border-radius:0;cursor:pointer}.suggestion:hover,.suggestion.selected{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px;font-weight:400}.list-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:7px}.transport-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.transport-choice{padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8faff}.calculate-footer{display:flex;justify-content:flex-end;margin-top:20px;padding-top:18px;border-top:1px solid var(--line)}.calculate-footer button{max-width:420px}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:#fff6df;border:1px solid #f0d58a}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{background:#f5f8fc;border-radius:12px;padding:14px}.kpi b{display:block;font-size:22px;margin-top:4px}.delivery{border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:12px}.badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1;vertical-align:top}th{font-size:12px;color:var(--muted)}.money{font-weight:800;white-space:nowrap}.empty{text-align:center;color:var(--muted);padding:24px}.actions{display:flex;gap:10px;align-items:end}.actions>*{flex:1}
 @media(max-width:900px){body{padding:12px}.grid{grid-template-columns:1fr}.span2,.span4{grid-column:span 1}.kpis{grid-template-columns:1fr 1fr}.actions{display:block}.actions>*{margin-top:8px}}
 </style></head><body><div class="wrap">
 <div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/carriers">Перевозчики</a></div>
-<div class="card"><h1>Расчёт заявки ЖБИ</h1><p class="muted">Добавьте несколько изделий. Машина и количество рейсов определяются по суммарному весу и транспортным габаритам. Товары разных производителей рассчитываются отдельными доставками.</p>
 <form method="post" id="quoteForm"><input type="hidden" name="items_json" id="itemsJson"><input type="hidden" name="vehicles_json" id="vehiclesJson">
-<div class="grid"><div class="span2"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required></div><div><label>Наценка на товары, %</label><input type="number" min="0" step="0.1" name="markup" value="{{ form.markup }}" required></div><div><label>&nbsp;</label><button type="submit">Рассчитать всю заявку</button></div></div>
-</form></div>
-<div class="card"><h2>Добавить изделие</h2><div class="grid">
+<div class="card"><h1>Расчёт и формирование заявки ЖБИ</h1><p class="muted">Добавьте изделия, укажите адрес и наценку. Для каждой позиции будет рассчитана закупочная цена с доставкой и цена клиенту.</p>
+<div class="grid"><div class="span2"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required></div><div class="span2"><label>Наценка на полную стоимость, %</label><input type="number" min="0" step="0.1" name="markup" value="{{ form.markup }}" required></div></div>
+<h2 style="margin-top:24px">Добавить изделие</h2><div class="grid">
 <div><label>Производитель</label><select id="supplier"><option value="">Любой производитель</option>{% for item in suppliers %}<option value="{{ item }}">{{ item }}</option>{% endfor %}</select></div>
 <div><label>Раздел</label><select id="group"><option value="">Все изделия / любые</option>{% for item in groups %}<option value="{{ item }}">{{ item }} — любые</option>{% endfor %}</select></div>
 <div class="span2"><label>Поиск изделия</label><input id="productSearch" autocomplete="off" placeholder="Например: ФБС 24.4.6, 2П 30.18 или лоток"></div>
 <div><label>Количество, шт.</label><input id="addQuantity" type="number" min="1" step="1" value="1"></div><div class="span2"><label>Выбрано</label><input id="selectedName" readonly placeholder="Сначала выберите позицию из списка ниже"></div><div><label>&nbsp;</label><button type="button" id="addItem">Добавить в заявку</button></div>
 <div class="span4"><div class="list-head"><label style="margin:0">Выбор изделия из раздела</label><span id="productCount" class="muted"></span></div><div id="suggestions" class="suggestions"></div></div>
-</div></div>
-<div class="card"><h2>Состав заявки</h2><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Производитель</th><th>Габариты</th><th>Масса 1 шт.</th><th>Количество</th><th>Общая масса</th><th>Цена завода без доставки</th><th></th></tr></thead><tbody id="cartBody"></tbody></table></div><div id="emptyCart" class="empty">В заявке пока нет изделий</div><div id="transportChoices" class="transport-grid"></div><p id="transportHint" class="muted">Транспорт появится после добавления изделия. Для каждого производителя машина выбирается отдельно.</p></div>
+</div>
+<h2 style="margin-top:24px">Состав заявки</h2><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Производитель</th><th>Габариты</th><th>Масса 1 шт.</th><th>Количество</th><th>Общая масса</th><th>Цена завода без доставки</th><th></th></tr></thead><tbody id="cartBody"></tbody></table></div><div id="emptyCart" class="empty">В заявке пока нет изделий</div><div id="transportChoices" class="transport-grid"></div><p id="transportHint" class="muted">Транспорт появится после добавления изделия. Для каждого производителя машина выбирается отдельно.</p><div class="calculate-footer"><button type="submit">Рассчитать полную заявку</button></div></div>
+</form>
 {% if error %}<div class="card warning"><b>Не удалось выполнить расчёт.</b> {{ error }}</div>{% endif %}
 {% if quote %}
-<div class="card summary"><h2>Итог заявки</h2><div class="kpis"><div class="kpi">Товары по закупке<b>{{ quote.purchase_total|money }} ₽</b><span class="muted">без доставки</span></div><div class="kpi">Продажа товаров<b>{{ quote.sale_total|money }} ₽</b><span class="muted">с наценкой {{ markup }}%, без доставки</span></div><div class="kpi">Доставка отдельно<b>{{ quote.delivery_total|money }} ₽</b><span class="muted">до объекта</span></div><div class="kpi">Итого клиенту<b>{{ quote.client_total|money }} ₽</b><span class="muted">товары + доставка</span></div></div><p><b>Общая масса:</b> {{ quote.weight_total_kg|round(0)|int }} кг · <b>транспортный габаритный объём:</b> {{ quote.volume_total_m3|round(2) }} м³</p></div>
-<div class="card"><h2>Цена изделий без доставки</h2><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Кол-во</th><th>Габариты</th><th>Масса</th><th>Цена завода за 1 шт.</th><th>Цена продажи за 1 шт.</th><th>Продажа всего</th></tr></thead><tbody>{% for line in quote.lines %}<tr><td><b>{{ line.name }}</b><div class="muted">{{ line.supplier }} · {{ line.group }}</div></td><td>{{ line.quantity }}</td><td>{{ line.size_mm }}{% if line.dimensions.estimated %}<div class="muted">объём оценён по массе</div>{% endif %}</td><td>{{ line.weight_kg|round(1) }} кг/шт.<br><b>{{ line.weight_total_kg|round(0)|int }} кг всего</b></td><td class="money">{{ line.price_rub|money }} ₽</td><td class="money">{{ line.sale_unit|money }} ₽</td><td class="money">{{ line.sale_total|money }} ₽</td></tr>{% endfor %}</tbody></table></div></div>
-<div class="card"><h2>Доставка до объекта — отдельно</h2>{% for item in quote.deliveries %}<div class="delivery"><h3>{{ item.supplier }}</h3><div class="badges"><span class="badge">{{ item.vehicle }} · {{ item.capacity_t|round(0)|int }} т</span><span class="badge">{{ item.trips }} рейс(а)</span><span class="badge">{{ item.distance|round(1) }} км · {{ item.distance_kind }}</span><span class="badge">ограничение: {{ item.limiting_factor }}</span></div><p><b>{{ item.delivery_total|money }} ₽ за доставку</b> · {{ item.rate_rub_km|money }} ₽/км · масса {{ item.weight_total_kg|round(0)|int }} кг · габаритный объём {{ item.volume_total_m3|round(2) }} м³</p><p class="muted">Средняя загрузка одного рейса: по массе {{ item.weight_load_pct|round(0)|int }}%, по объёму {{ item.volume_load_pct|round(0)|int }}%. Погрузка: {{ item.loading_address }}</p></div>{% endfor %}{% for message in quote.errors %}<div class="warning">{{ message }}</div>{% endfor %}</div>
+<div class="card summary"><h2>Итог заявки</h2><div class="kpis"><div class="kpi">Товары по закупке<b>{{ quote.purchase_total|money }} ₽</b><span class="muted">без доставки</span></div><div class="kpi">Закупка с доставкой<b>{{ quote.purchase_with_delivery_total|money }} ₽</b><span class="muted">товары + доставка</span></div><div class="kpi">Доставка отдельно<b>{{ quote.delivery_total|money }} ₽</b><span class="muted">до объекта</span></div><div class="kpi">Цена клиенту<b>{{ quote.client_total|money }} ₽</b><span class="muted">с наценкой {{ markup }}% на полную стоимость</span></div></div><p><b>Общая масса:</b> {{ quote.weight_total_kg|round(0)|int }} кг · <b>транспортный габаритный объём:</b> {{ quote.volume_total_m3|round(2) }} м³</p></div>
+<div class="card"><h2>Стоимость каждой позиции</h2><p class="muted">Доставка распределяется между изделиями одного производителя пропорционально их массе.</p><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Кол-во</th><th>Габариты и масса</th><th>Завод за 1 шт.</th><th>Доставка на 1 шт.</th><th>Закупка за 1 шт. с доставкой</th><th>Цена клиенту за 1 шт.</th><th>Клиенту всего</th></tr></thead><tbody>{% for line in quote.lines %}<tr><td><b>{{ line.name }}</b><div class="muted">{{ line.supplier }} · {{ line.group }}</div></td><td>{{ line.quantity }}</td><td>{{ line.size_mm }}<br>{{ line.weight_kg|round(1) }} кг/шт.{% if line.dimensions.estimated %}<div class="muted">объём оценён по массе</div>{% endif %}</td><td class="money">{{ line.price_rub|money }} ₽</td><td class="money">{{ line.delivery_unit|money }} ₽</td><td class="money">{{ line.purchase_with_delivery_unit|money }} ₽</td><td class="money">{{ line.client_unit|money }} ₽<div class="muted">наценка {{ markup }}%</div></td><td class="money">{{ line.client_line_total|money }} ₽</td></tr>{% endfor %}</tbody></table></div></div>
+<div class="card"><h2>Доставка до объекта — отдельно</h2>{% for item in quote.deliveries %}<div class="delivery"><h3>{{ item.supplier }}</h3><div class="badges"><span class="badge">{{ item.vehicle }} · {{ item.capacity_t|round(0)|int }} т</span><span class="badge">{{ item.trips }} рейс(а)</span><span class="badge">{{ item.distance|round(1) }} км · {{ item.distance_kind }}</span><span class="badge">ограничение: {{ item.limiting_factor }}</span></div><p><b>{{ item.delivery_total|money }} ₽ за доставку</b> · {{ item.rate_rub_km|money }} ₽/км · масса {{ item.weight_total_kg|round(0)|int }} кг · габаритный объём {{ item.volume_total_m3|round(2) }} м³</p><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Всего</th><th>На один рейс</th></tr></thead><tbody>{% for line in item.lines %}<tr><td>{{ line.name }}</td><td>{{ line.quantity }} шт.</td><td><b>{{ line.quantity_per_trip }}</b></td></tr>{% endfor %}</tbody></table></div><p class="muted">Средняя загрузка одного рейса: по массе {{ item.weight_load_pct|round(0)|int }}%, по объёму {{ item.volume_load_pct|round(0)|int }}%. Погрузка: {{ item.loading_address }}</p></div>{% endfor %}{% for message in quote.errors %}<div class="warning">{{ message }}</div>{% endfor %}</div>
 {% endif %}
 </div><script>
 const catalog={{ catalog_json|safe }},deliveryCatalog={{ delivery_json|safe }};
