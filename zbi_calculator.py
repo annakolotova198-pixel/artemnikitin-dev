@@ -198,7 +198,23 @@ def parse_cart(raw_value, product_by_id):
     return [{"id": product_id, "quantity": quantity} for product_id, quantity in merged.items()]
 
 
-def build_quote(cart, product_by_id, delivery_rows, lat, lon, markup):
+def parse_vehicle_overrides(raw_value, delivery_rows):
+    try:
+        raw = json.loads(raw_value or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        return {}
+    allowed = {(row["supplier"], row["vehicle"]) for row in delivery_rows}
+    return {
+        str(supplier): str(vehicle)
+        for supplier, vehicle in raw.items()
+        if (str(supplier), str(vehicle)) in allowed
+    }
+
+
+def build_quote(cart, product_by_id, delivery_rows, lat, lon, markup, vehicle_overrides=None):
+    vehicle_overrides = vehicle_overrides or {}
     supplier_lines = defaultdict(list)
     all_lines = []
     for cart_item in cart:
@@ -226,7 +242,9 @@ def build_quote(cart, product_by_id, delivery_rows, lat, lon, markup):
             errors.append(f"Для производителя «{supplier}» нет тарифа доставки.")
             continue
         distance, distance_kind = road_distance_km(options[0]["lat"], options[0]["lon"], lat, lon)
-        calculation = mixed_delivery_calculation(lines, distance, options)
+        selected_vehicle = vehicle_overrides.get(supplier)
+        selected_options = [row for row in options if row["vehicle"] == selected_vehicle] if selected_vehicle else options
+        calculation = mixed_delivery_calculation(lines, distance, selected_options)
         if not calculation:
             errors.append(f"Заявка производителя «{supplier}» не помещается в доступный транспорт по весу или габаритам.")
             continue
@@ -261,21 +279,22 @@ PAGE = r"""
 <title>Калькулятор заявки ЖБИ</title>
 <style>
 :root{--ink:#18202a;--muted:#647184;--blue:#185bd8;--line:#dce3ec;--bg:#f3f6fa;--ok:#e9f8ef;--danger:#a62d2d}
-*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1380px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}.span4{grid-column:span 4}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.remove{background:#fff;color:var(--danger);border-color:#e6bcbc;padding:7px;min-height:34px}.hint,.muted{color:var(--muted);font-size:13px}.search-wrap{position:relative}.suggestions{position:absolute;z-index:20;left:0;right:0;top:74px;max-height:320px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 28px #10203026;display:none}.suggestion{display:block;width:100%;min-height:0;padding:10px 12px;background:#fff;color:var(--ink);text-align:left;border:0;border-bottom:1px solid #edf0f4;border-radius:0;cursor:pointer}.suggestion:hover{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px;font-weight:400}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:#fff6df;border:1px solid #f0d58a}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{background:#f5f8fc;border-radius:12px;padding:14px}.kpi b{display:block;font-size:22px;margin-top:4px}.delivery{border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:12px}.badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1;vertical-align:top}th{font-size:12px;color:var(--muted)}.money{font-weight:800;white-space:nowrap}.empty{text-align:center;color:var(--muted);padding:24px}.actions{display:flex;gap:10px;align-items:end}.actions>*{flex:1}
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1380px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}.span4{grid-column:span 4}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.remove{background:#fff;color:var(--danger);border-color:#e6bcbc;padding:7px;min-height:34px}.hint,.muted{color:var(--muted);font-size:13px}.suggestions{max-height:360px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px}.suggestion{display:block;width:100%;min-height:0;padding:10px 12px;background:#fff;color:var(--ink);text-align:left;border:0;border-bottom:1px solid #edf0f4;border-radius:0;cursor:pointer}.suggestion:hover,.suggestion.selected{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px;font-weight:400}.list-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:7px}.transport-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.transport-choice{padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8faff}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:#fff6df;border:1px solid #f0d58a}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{background:#f5f8fc;border-radius:12px;padding:14px}.kpi b{display:block;font-size:22px;margin-top:4px}.delivery{border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:12px}.badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1;vertical-align:top}th{font-size:12px;color:var(--muted)}.money{font-weight:800;white-space:nowrap}.empty{text-align:center;color:var(--muted);padding:24px}.actions{display:flex;gap:10px;align-items:end}.actions>*{flex:1}
 @media(max-width:900px){body{padding:12px}.grid{grid-template-columns:1fr}.span2,.span4{grid-column:span 1}.kpis{grid-template-columns:1fr 1fr}.actions{display:block}.actions>*{margin-top:8px}}
 </style></head><body><div class="wrap">
 <div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/carriers">Перевозчики</a></div>
 <div class="card"><h1>Расчёт заявки ЖБИ</h1><p class="muted">Добавьте несколько изделий. Машина и количество рейсов определяются по суммарному весу и транспортным габаритам. Товары разных производителей рассчитываются отдельными доставками.</p>
-<form method="post" id="quoteForm"><input type="hidden" name="items_json" id="itemsJson">
+<form method="post" id="quoteForm"><input type="hidden" name="items_json" id="itemsJson"><input type="hidden" name="vehicles_json" id="vehiclesJson">
 <div class="grid"><div class="span2"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required></div><div><label>Наценка на товары, %</label><input type="number" min="0" step="0.1" name="markup" value="{{ form.markup }}" required></div><div><label>&nbsp;</label><button type="submit">Рассчитать всю заявку</button></div></div>
 </form></div>
 <div class="card"><h2>Добавить изделие</h2><div class="grid">
 <div><label>Производитель</label><select id="supplier"><option value="">Любой производитель</option>{% for item in suppliers %}<option value="{{ item }}">{{ item }}</option>{% endfor %}</select></div>
 <div><label>Раздел</label><select id="group"><option value="">Все изделия / любые</option>{% for item in groups %}<option value="{{ item }}">{{ item }} — любые</option>{% endfor %}</select></div>
-<div class="span2 search-wrap"><label>Поиск изделия</label><input id="productSearch" autocomplete="off" placeholder="Например: ФБС 24.4.6, 2П 30.18 или лоток"><div id="suggestions" class="suggestions"></div></div>
-<div><label>Количество, шт.</label><input id="addQuantity" type="number" min="1" step="1" value="1"></div><div class="span2"><label>Выбрано</label><input id="selectedName" readonly placeholder="Сначала выберите позицию из подсказки"></div><div><label>&nbsp;</label><button type="button" id="addItem">Добавить в заявку</button></div>
+<div class="span2"><label>Поиск изделия</label><input id="productSearch" autocomplete="off" placeholder="Например: ФБС 24.4.6, 2П 30.18 или лоток"></div>
+<div><label>Количество, шт.</label><input id="addQuantity" type="number" min="1" step="1" value="1"></div><div class="span2"><label>Выбрано</label><input id="selectedName" readonly placeholder="Сначала выберите позицию из списка ниже"></div><div><label>&nbsp;</label><button type="button" id="addItem">Добавить в заявку</button></div>
+<div class="span4"><div class="list-head"><label style="margin:0">Выбор изделия из раздела</label><span id="productCount" class="muted"></span></div><div id="suggestions" class="suggestions"></div></div>
 </div></div>
-<div class="card"><h2>Состав заявки</h2><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Производитель</th><th>Габариты</th><th>Масса 1 шт.</th><th>Количество</th><th>Общая масса</th><th>Цена завода без доставки</th><th></th></tr></thead><tbody id="cartBody"></tbody></table></div><div id="emptyCart" class="empty">В заявке пока нет изделий</div></div>
+<div class="card"><h2>Состав заявки</h2><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Производитель</th><th>Габариты</th><th>Масса 1 шт.</th><th>Количество</th><th>Общая масса</th><th>Цена завода без доставки</th><th></th></tr></thead><tbody id="cartBody"></tbody></table></div><div id="emptyCart" class="empty">В заявке пока нет изделий</div><div id="transportChoices" class="transport-grid"></div><p id="transportHint" class="muted">Транспорт появится после добавления изделия. Для каждого производителя машина выбирается отдельно.</p></div>
 {% if error %}<div class="card warning"><b>Не удалось выполнить расчёт.</b> {{ error }}</div>{% endif %}
 {% if quote %}
 <div class="card summary"><h2>Итог заявки</h2><div class="kpis"><div class="kpi">Товары по закупке<b>{{ quote.purchase_total|money }} ₽</b><span class="muted">без доставки</span></div><div class="kpi">Продажа товаров<b>{{ quote.sale_total|money }} ₽</b><span class="muted">с наценкой {{ markup }}%, без доставки</span></div><div class="kpi">Доставка отдельно<b>{{ quote.delivery_total|money }} ₽</b><span class="muted">до объекта</span></div><div class="kpi">Итого клиенту<b>{{ quote.client_total|money }} ₽</b><span class="muted">товары + доставка</span></div></div><p><b>Общая масса:</b> {{ quote.weight_total_kg|round(0)|int }} кг · <b>транспортный габаритный объём:</b> {{ quote.volume_total_m3|round(2) }} м³</p></div>
@@ -283,14 +302,21 @@ PAGE = r"""
 <div class="card"><h2>Доставка до объекта — отдельно</h2>{% for item in quote.deliveries %}<div class="delivery"><h3>{{ item.supplier }}</h3><div class="badges"><span class="badge">{{ item.vehicle }} · {{ item.capacity_t|round(0)|int }} т</span><span class="badge">{{ item.trips }} рейс(а)</span><span class="badge">{{ item.distance|round(1) }} км · {{ item.distance_kind }}</span><span class="badge">ограничение: {{ item.limiting_factor }}</span></div><p><b>{{ item.delivery_total|money }} ₽ за доставку</b> · {{ item.rate_rub_km|money }} ₽/км · масса {{ item.weight_total_kg|round(0)|int }} кг · габаритный объём {{ item.volume_total_m3|round(2) }} м³</p><p class="muted">Средняя загрузка одного рейса: по массе {{ item.weight_load_pct|round(0)|int }}%, по объёму {{ item.volume_load_pct|round(0)|int }}%. Погрузка: {{ item.loading_address }}</p></div>{% endfor %}{% for message in quote.errors %}<div class="warning">{{ message }}</div>{% endfor %}</div>
 {% endif %}
 </div><script>
-const catalog={{ catalog_json|safe }};let cart={{ cart_json|safe }};let selectedId='';
-const supplier=document.getElementById('supplier'),group=document.getElementById('group'),search=document.getElementById('productSearch'),box=document.getElementById('suggestions'),selectedName=document.getElementById('selectedName'),qty=document.getElementById('addQuantity'),body=document.getElementById('cartBody'),empty=document.getElementById('emptyCart'),itemsJson=document.getElementById('itemsJson');
+const catalog={{ catalog_json|safe }},deliveryCatalog={{ delivery_json|safe }};
+let cart={{ cart_json|safe }},vehicleOverrides={{ vehicle_overrides_json|safe }},selectedId='',recalcTimer=null;
+const hasQuote={{ 'true' if quote else 'false' }};
+const supplier=document.getElementById('supplier'),group=document.getElementById('group'),search=document.getElementById('productSearch'),box=document.getElementById('suggestions'),productCount=document.getElementById('productCount'),selectedName=document.getElementById('selectedName'),qty=document.getElementById('addQuantity'),body=document.getElementById('cartBody'),empty=document.getElementById('emptyCart'),itemsJson=document.getElementById('itemsJson'),vehiclesJson=document.getElementById('vehiclesJson'),transportChoices=document.getElementById('transportChoices'),transportHint=document.getElementById('transportHint'),quoteForm=document.getElementById('quoteForm');
 const esc=s=>String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-function filtered(){const q=search.value.trim().toLowerCase();if(q.length<2)return[];return catalog.filter(p=>(!supplier.value||p.supplier===supplier.value)&&(!group.value||p.group===group.value)&&(p.name.toLowerCase().includes(q)||p.size_mm.toLowerCase().includes(q))).slice(0,50)}
-function show(){const rows=filtered();if(search.value.trim().length<2){box.style.display='none';return}box.innerHTML=rows.map(p=>`<button type="button" class="suggestion" data-id="${p.id}"><b>${esc(p.name)}</b><small>${esc(p.supplier)} · ${esc(p.group)} · ${esc(p.size_mm)} · ${p.weight_kg||'масса не указана'} кг · ${p.price_rub} ₽</small></button>`).join('')||'<div class="suggestion">Совпадений нет</div>';box.style.display='block';box.querySelectorAll('[data-id]').forEach(el=>el.onclick=()=>{const p=catalog.find(x=>x.id===el.dataset.id);selectedId=p.id;selectedName.value=p.name;search.value=p.name;box.style.display='none'})}
-function resetSearch(){selectedId='';selectedName.value='';search.value='';box.style.display='none'}supplier.addEventListener('change',resetSearch);group.addEventListener('change',resetSearch);search.addEventListener('input',()=>{selectedId='';selectedName.value='';show()});search.addEventListener('focus',show);document.addEventListener('click',e=>{if(!e.target.closest('.search-wrap'))box.style.display='none'});
-function render(){body.innerHTML=cart.map((item,i)=>{const p=catalog.find(x=>x.id===item.id);const total=p.weight_kg*item.quantity;return`<tr><td><b>${esc(p.name)}</b><div class="muted">${esc(p.group)}</div></td><td>${esc(p.supplier)}</td><td>${esc(p.size_mm)}</td><td>${p.weight_kg} кг</td><td><input class="cartQty" data-index="${i}" type="number" min="1" step="1" value="${item.quantity}"></td><td><b>${Math.round(total)} кг</b></td><td class="money">${Math.round(p.price_rub).toLocaleString('ru-RU')} ₽/шт.</td><td><button type="button" class="remove" data-index="${i}">Удалить</button></td></tr>`}).join('');empty.style.display=cart.length?'none':'block';itemsJson.value=JSON.stringify(cart);document.querySelectorAll('.cartQty').forEach(el=>el.onchange=()=>{cart[+el.dataset.index].quantity=Math.max(1,parseInt(el.value)||1);render()});document.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{cart.splice(+el.dataset.index,1);render()})}
-document.getElementById('addItem').onclick=()=>{if(!selectedId){alert('Выберите точное изделие из подсказки');return}const amount=Math.max(1,parseInt(qty.value)||1);const old=cart.find(x=>x.id===selectedId);if(old)old.quantity+=amount;else cart.push({id:selectedId,quantity:amount});qty.value=1;resetSearch();render()};document.getElementById('quoteForm').onsubmit=e=>{if(!cart.length){e.preventDefault();alert('Добавьте хотя бы одно изделие в заявку');return}itemsJson.value=JSON.stringify(cart)};render();
+function sync(){itemsJson.value=JSON.stringify(cart);vehiclesJson.value=JSON.stringify(vehicleOverrides)}
+function scheduleRecalculate(){if(!hasQuote||!cart.length||!quoteForm.elements.address.value.trim())return;sync();clearTimeout(recalcTimer);recalcTimer=setTimeout(()=>quoteForm.requestSubmit(),450)}
+function filtered(){const q=search.value.trim().toLowerCase();if(!group.value&&q.length<2)return[];return catalog.filter(p=>(!supplier.value||p.supplier===supplier.value)&&(!group.value||p.group===group.value)&&(!q||p.name.toLowerCase().includes(q)||p.size_mm.toLowerCase().includes(q))).slice(0,500)}
+function show(){const rows=filtered();productCount.textContent=rows.length?`${rows.length} позиций`:(group.value||search.value.trim().length>=2?'0 позиций':'Выберите раздел или введите минимум 2 символа');box.innerHTML=rows.map(p=>`<button type="button" class="suggestion${p.id===selectedId?' selected':''}" data-id="${p.id}"><b>${esc(p.name)}</b><small>${esc(p.supplier)} · ${esc(p.group)} · ${esc(p.size_mm)} · ${p.weight_kg||'масса не указана'} кг · ${p.price_rub} ₽</small></button>`).join('')||'<div class="empty">Изделия появятся здесь после выбора раздела</div>';box.querySelectorAll('[data-id]').forEach(el=>el.onclick=()=>{const p=catalog.find(x=>x.id===el.dataset.id);selectedId=p.id;selectedName.value=`${p.name} — ${p.supplier}`;show()})}
+function resetSelection(clearSearch=true){selectedId='';selectedName.value='';if(clearSearch)search.value='';show()}
+supplier.addEventListener('change',()=>resetSelection());group.addEventListener('change',()=>resetSelection());search.addEventListener('input',()=>resetSelection(false));
+function renderTransport(){const suppliers=[...new Set(cart.map(item=>catalog.find(p=>p.id===item.id)?.supplier).filter(Boolean))];Object.keys(vehicleOverrides).forEach(name=>{if(!suppliers.includes(name))delete vehicleOverrides[name]});transportChoices.innerHTML=suppliers.map(name=>{const options=deliveryCatalog.filter(row=>row.supplier===name);if(!options.length)return`<div class="transport-choice"><b>${esc(name)}</b><div class="muted">Нет тарифа доставки</div></div>`;if(!options.some(row=>row.vehicle===vehicleOverrides[name]))vehicleOverrides[name]=options[0].vehicle;return`<div class="transport-choice"><label>Транспорт: ${esc(name)}</label><select class="vehicleChoice" data-supplier="${esc(name)}">${options.map(row=>`<option value="${esc(row.vehicle)}"${row.vehicle===vehicleOverrides[name]?' selected':''}>${esc(row.vehicle)} · ${row.capacity_t} т · ${row.rate_rub_km} ₽/км</option>`).join('')}</select></div>`}).join('');transportHint.style.display=suppliers.length?'none':'block';transportChoices.querySelectorAll('.vehicleChoice').forEach(el=>el.onchange=()=>{vehicleOverrides[el.dataset.supplier]=el.value;sync();scheduleRecalculate()});sync()}
+function render(){body.innerHTML=cart.map((item,i)=>{const p=catalog.find(x=>x.id===item.id);const total=p.weight_kg*item.quantity;return`<tr><td><b>${esc(p.name)}</b><div class="muted">${esc(p.group)}</div></td><td>${esc(p.supplier)}</td><td>${esc(p.size_mm)}</td><td>${p.weight_kg} кг</td><td><input class="cartQty" data-index="${i}" type="number" min="1" step="1" value="${item.quantity}"></td><td><b>${Math.round(total)} кг</b></td><td class="money">${Math.round(p.price_rub).toLocaleString('ru-RU')} ₽/шт.</td><td><button type="button" class="remove" data-index="${i}">Удалить</button></td></tr>`}).join('');empty.style.display=cart.length?'none':'block';renderTransport();document.querySelectorAll('.cartQty').forEach(el=>el.onchange=()=>{cart[+el.dataset.index].quantity=Math.max(1,parseInt(el.value)||1);render();scheduleRecalculate()});document.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{cart.splice(+el.dataset.index,1);render();scheduleRecalculate()})}
+document.getElementById('addItem').onclick=()=>{if(!selectedId){alert('Выберите точное изделие из списка ниже');return}const amount=Math.max(1,parseInt(qty.value)||1);const old=cart.find(x=>x.id===selectedId);if(old)old.quantity+=amount;else cart.push({id:selectedId,quantity:amount});qty.value=1;resetSelection();render();scheduleRecalculate()};
+quoteForm.elements.address.addEventListener('change',scheduleRecalculate);quoteForm.elements.markup.addEventListener('change',scheduleRecalculate);quoteForm.onsubmit=e=>{if(!cart.length){e.preventDefault();alert('Добавьте хотя бы одно изделие в заявку');return}sync()};show();render();
 </script></body></html>
 """
 
@@ -311,6 +337,7 @@ def calculator():
     }
     markup = max(0, _float(form["markup"], 0))
     cart = parse_cart(request.form.get("items_json", "[]"), product_by_id)
+    vehicle_overrides = parse_vehicle_overrides(request.form.get("vehicles_json", "{}"), delivery_rows)
     quote = None
     error = ""
     if request.method == "POST":
@@ -321,12 +348,15 @@ def calculator():
             if lat is None:
                 error = "Адрес не найден. Проверьте адрес или введите координаты через запятую."
             else:
-                quote = build_quote(cart, product_by_id, delivery_rows, lat, lon, markup)
+                quote = build_quote(cart, product_by_id, delivery_rows, lat, lon, markup, vehicle_overrides)
                 if not quote["deliveries"]:
                     error = "Не удалось подобрать транспорт ни для одного производителя."
     catalog_for_js = [{
         key: item[key] for key in ("id", "supplier", "group", "name", "size_mm", "weight_kg", "price_rub")
     } for item in products]
+    delivery_for_js = [{
+        key: item[key] for key in ("supplier", "vehicle", "capacity_t", "rate_rub_km")
+    } for item in delivery_rows]
     return render_template_string(
         PAGE,
         suppliers=sorted({item["supplier"] for item in products}),
@@ -337,4 +367,6 @@ def calculator():
         error=error,
         catalog_json=json.dumps(catalog_for_js, ensure_ascii=False).replace("</", "<\\/"),
         cart_json=json.dumps(cart, ensure_ascii=False).replace("</", "<\\/"),
+        delivery_json=json.dumps(delivery_for_js, ensure_ascii=False).replace("</", "<\\/"),
+        vehicle_overrides_json=json.dumps(vehicle_overrides, ensure_ascii=False).replace("</", "<\\/"),
     )
