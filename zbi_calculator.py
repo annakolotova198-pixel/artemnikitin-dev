@@ -2,6 +2,8 @@ import csv
 import json
 import math
 import os
+import re
+from collections import defaultdict
 from pathlib import Path
 
 import requests
@@ -21,311 +23,48 @@ def _float(value, default=0.0):
         return default
 
 
-def load_catalog():
-    with PRODUCTS_FILE.open("r", encoding="utf-8-sig", newline="") as handle:
-        products = list(csv.DictReader(handle))
-    for index, item in enumerate(products):
-        item["id"] = str(index)
-        item["price_rub"] = _float(item.get("price_rub"))
-        item["weight_kg"] = _float(item.get("weight_kg"))
-    with DELIVERY_FILE.open("r", encoding="utf-8-sig", newline="") as handle:
-        delivery = list(csv.DictReader(handle))
-    for item in delivery:
-        for key in ("capacity_t", "rate_rub_km", "lat", "lon"):
-            item[key] = _float(item.get(key))
-    return products, delivery
+def parse_dimensions(size_text, weight_kg=0):
+    """Return transport envelope dimensions in metres and its volume.
 
-
-def geocode(address):
-    text = str(address or "").strip()
-    if not text:
-        return None, None
-    # A coordinate pair is useful on sites where the geocoding key is temporarily unavailable.
-    if "," in text:
-        parts = [part.strip() for part in text.split(",")]
-        if len(parts) == 2:
-            lat, lon = _float(parts[0], None), _float(parts[1], None)
-            if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
-                return lat, lon
-    api_key = current_app.config.get("YANDEX_API_KEY") or os.getenv("YANDEX_API_KEY", "")
-    if not api_key:
-        return None, None
-    try:
-        response = requests.get(
-            "https://geocode-maps.yandex.ru/1.x/",
-            params={"apikey": api_key, "geocode": text, "format": "json", "lang": "ru_RU"},
-            timeout=15,
-        )
-        response.raise_for_status()
-        member = response.json()["response"]["GeoObjectCollection"]["featureMember"][0]
-        lon, lat = member["GeoObject"]["Point"]["pos"].split()
-        return float(lat), float(lon)
-    except Exception:
-        return None, None
-
-
-def haversine_km(lat1, lon1, lat2, lon2):
-    radius = 6371.0
-    values = [math.radians(value) for value in (lat1, lon1, lat2, lon2)]
-    lat1, lon1, lat2, lon2 = values
-    dlat, dlon = lat2 - lat1, lon2 - lon1
-    value = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    return radius * 2 * math.asin(math.sqrt(value))
-
-
-def road_distance_km(start_lat, start_lon, end_lat, end_lon):
-    coordinates = f"{start_lon},{start_lat};{end_lon},{end_lat}"
-    try:
-        response = requests.get(
-            f"https://router.project-osrm.org/route/v1/driving/{coordinates}",
-            params={"overview": "false", "alternatives": "false", "steps": "false"},
-            timeout=15,
-        )
-        data = response.json()
-        if data.get("code") == "Ok":
-            return data["routes"][0]["distance"] / 1000, "по автодороге"
-    except Exception:
-        pass
-    # More realistic than a straight line when the public router is unavailable.
-    return haversine_km(start_lat, start_lon, end_lat, end_lon) * 1.25, "оценка по прямой × 1,25"
-
-
-def delivery_calculation(product, quantity, distance, delivery_options):
-    weight = product["weight_kg"]
-    if weight <= 0:
-        return None
-    alternatives = []
-    for option in delivery_options:
-        capacity_kg = option["capacity_t"] * 1000
-        units_full = math.floor(capacity_kg / weight)
-        if units_full < 1:
-            continue
-        trips = math.ceil(quantity / units_full)
-        trip_price = distance * option["rate_rub_km"]
-        request_delivery = trip_price * trips
-        alternatives.append({
-            "vehicle": option["vehicle"],
-            "capacity_t": option["capacity_t"],
-            "rate": option["rate_rub_km"],
-            "units_full": units_full,
-            "trips": trips,
-            "request_delivery": request_delivery,
-            "request_delivery_unit": request_delivery / quantity,
-            "full_delivery": trip_price,
-            "full_delivery_unit": trip_price / units_full,
-            "loading_address": option["loading_address"],
-        })
-    if not alternatives:
-        return None
-    request_best = min(alternatives, key=lambda item: (item["request_delivery"], item["request_delivery_unit"]))
-    full_best = min(alternatives, key=lambda item: (item["full_delivery_unit"], item["full_delivery"]))
+    The catalogue contains dimensions written with х, x, × and *.  For products
+    without three dimensions we use a conservative volume estimate based on the
+    concrete weight and mark it as estimated.
+    """
+    normalized = str(size_text or "").lower()
+    for marker in ("×", "х", "x", "*", "õ"):
+        normalized = normalized.replace(marker, "x")
+    numbers = [_float(value) for value in re.findall(r"\d+(?:[.,]\d+)?", normalized)]
+    numbers = [value for value in numbers if value > 0]
+    if len(numbers) >= 3:
+        metres = [value / 1000 for value in numbers[:3]]
+        length, width, height = sorted(metres, reverse=True)
+        return {
+            "length_m": length,
+            "width_m": width,
+            "height_m": height,
+            "volume_m3": length * width * height,
+            "estimated": False,
+        }
+    estimated_volume = max(_float(weight_kg) / 2400 * 1.35, 0.03)
     return {
-        "request_vehicle": request_best["vehicle"],
-        "request_capacity_t": request_best["capacity_t"],
-        "request_rate": request_best["rate"],
-        "request_units_per_trip": request_best["units_full"],
-        "request_trips": request_best["trips"],
-        "request_delivery": request_best["request_delivery"],
-        "request_delivery_unit": request_best["request_delivery_unit"],
-        "full_vehicle": full_best["vehicle"],
-        "full_capacity_t": full_best["capacity_t"],
-        "full_rate": full_best["rate"],
-        "units_full": full_best["units_full"],
-        "full_delivery": full_best["full_delivery"],
-        "full_delivery_unit": full_best["full_delivery_unit"],
-        "loading_address": request_best["loading_address"],
+        "length_m": 0,
+        "width_m": 0,
+        "height_m": 0,
+        "volume_m3": estimated_volume,
+        "estimated": True,
     }
-
-
-PAGE = r"""
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Калькулятор ЖБИ</title>
-  <style>
-    :root{--ink:#18202a;--muted:#647184;--blue:#185bd8;--line:#dce3ec;--bg:#f3f6fa;--ok:#e9f8ef}
-    *{box-sizing:border-box} body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}
-    .wrap{max-width:1280px;margin:auto}.card{background:white;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}
-    h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}
-    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.wide{grid-column:span 2}
-    label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}
-    button{background:var(--blue);border-color:var(--blue);color:white;font-weight:700;cursor:pointer}.hint,.muted{color:var(--muted);font-size:13px}
-    .search-wrap{position:relative}.suggestions{position:absolute;z-index:5;left:0;right:0;top:74px;max-height:320px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 28px #10203026;display:none}
-    .suggestion{padding:10px 12px;border-bottom:1px solid #edf0f4;cursor:pointer}.suggestion:hover{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px}
-    .summary{background:var(--ok);border:1px solid #bfe5cc}.result{border:1px solid var(--line);border-radius:14px;padding:18px;margin-top:14px}.result.best{border:2px solid #2a9d5b}
-    .badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}
-    table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1}th{font-size:12px;color:var(--muted)}
-    .money{font-weight:800;white-space:nowrap}.warning{background:#fff6df;border:1px solid #f0d58a;padding:13px;border-radius:10px}
-    @media(max-width:850px){body{padding:12px}.grid{grid-template-columns:1fr}.wide{grid-column:span 1}.table-wrap{overflow:auto}}
-  </style>
-</head>
-<body><div class="wrap">
-  <div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/carriers">Перевозчики</a></div>
-  <div class="card">
-    <h1>Калькулятор ЖБИ</h1>
-    <p class="muted">В каталоге {{ product_count }} позиций от {{ supplier_count }} производителей. Тариф и грузоподъёмность берутся только из листа «Доставка».</p>
-    <form method="post" id="zbiForm">
-      <div class="grid">
-        <div class="wide"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required><div class="hint">Можно также ввести координаты: 55.75, 37.62</div></div>
-        <div><label>Производитель</label><select name="supplier" id="supplier"><option value="">Любой — найти ближайшего</option>{% for item in suppliers %}<option value="{{ item }}" {% if form.supplier==item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></div>
-        <div><label>Группа изделий</label><select name="group" id="group"><option value="">Все ЖБИ / любое изделие</option>{% for item in groups %}<option value="{{ item }}" {% if form.group==item %}selected{% endif %}>{{ item }} — любые</option>{% endfor %}</select></div>
-        <div class="wide search-wrap"><label>Поиск и выбор изделия</label><input id="productSearch" autocomplete="off" value="{{ form.search }}" placeholder="Например: кольцо КС 15-9 или бордюр"><input type="hidden" name="product_id" id="productId" value="{{ form.product_id }}"><input type="hidden" name="search" id="searchValue" value="{{ form.search }}"><div class="suggestions" id="suggestions"></div><div class="hint">Можно выбрать точную позицию или написать часть названия и оставить без выбора.</div></div>
-        <div><label>Количество, шт.</label><input type="number" min="1" step="1" name="quantity" value="{{ form.quantity }}" required></div>
-        <div><label>Наценка менеджера, %</label><input type="number" min="0" step="0.1" name="markup" value="{{ form.markup }}" required></div>
-        <div><label>&nbsp;</label><button type="submit">Рассчитать стоимость</button></div>
-      </div>
-    </form>
-  </div>
-  {% if error %}<div class="card warning"><b>Не удалось выполнить расчёт.</b> {{ error }}</div>{% endif %}
-  {% if results %}
-  <div class="card summary"><h2>Рекомендация</h2><p>Ближайший подходящий производитель: <b>{{ results[0].supplier }}</b>, расстояние {{ results[0].distance|round(1) }} км. Ниже показана закупка, доставка и продажа с наценкой {{ markup }}%.</p></div>
-  <div class="card"><h2>Подходящие варианты</h2><p class="muted">Сначала ближайшие производители, внутри одного производителя — меньшая стоимость единицы с доставкой. Показано до 50 вариантов.</p>
-  {% for item in results %}<article class="result {% if loop.first %}best{% endif %}">
-    <h3>{{ item.name }}</h3><div class="badges"><span class="badge">{{ item.supplier }}</span><span class="badge">{{ item.group }}</span><span class="badge">{{ item.weight_kg|round(1) }} кг/шт.</span><span class="badge">{{ item.distance|round(1) }} км · {{ item.distance_kind }}</span></div>
-    <div class="muted">{{ item.size_mm }}{% if item.note %} · {{ item.note }}{% endif %}</div>
-    <div class="table-wrap"><table><thead><tr><th>Сценарий</th><th>Количество</th><th>Машина</th><th>Рейсов</th><th>Доставка</th><th>Закупка с доставкой, 1 шт.</th><th>Продажа, 1 шт.</th><th>Продажа всего</th></tr></thead><tbody>
-      <tr><td>Заявка менеджера</td><td>{{ quantity }}</td><td>{{ item.delivery.request_vehicle }} · {{ item.delivery.request_capacity_t|round(0)|int }} т</td><td>{{ item.delivery.request_trips }}</td><td class="money">{{ item.delivery.request_delivery|money }} ₽</td><td class="money">{{ item.request_delivered_unit|money }} ₽</td><td class="money">{{ item.request_sale_unit|money }} ₽</td><td class="money">{{ item.request_sale_total|money }} ₽</td></tr>
-      <tr><td>Полная загрузка</td><td>{{ item.delivery.units_full }}</td><td>{{ item.delivery.full_vehicle }} · {{ item.delivery.full_capacity_t|round(0)|int }} т</td><td>1</td><td class="money">{{ item.delivery.full_delivery|money }} ₽</td><td class="money">{{ item.full_delivered_unit|money }} ₽</td><td class="money">{{ item.full_sale_unit|money }} ₽</td><td class="money">{{ item.full_sale_total|money }} ₽</td></tr>
-    </tbody></table></div>
-    <p class="muted">Цена завода: {{ item.price_rub|money }} ₽/шт. · Тариф заявки: {{ item.delivery.request_rate|money }} ₽/км · тариф полной машины: {{ item.delivery.full_rate|money }} ₽/км · Загрузка: {{ item.delivery.loading_address }}</p>
-  </article>{% endfor %}</div>
-  {% endif %}
-</div>
-<script>
-const catalog={{ catalog_json|safe }}; const supplier=document.getElementById('supplier'); const group=document.getElementById('group'); const input=document.getElementById('productSearch'); const box=document.getElementById('suggestions'); const idField=document.getElementById('productId'); const searchField=document.getElementById('searchValue');
-function visibleProducts(){const q=input.value.trim().toLowerCase();return catalog.filter(p=>(!supplier.value||p.supplier===supplier.value)&&(!group.value||p.group===group.value)&&(!q||p.name.toLowerCase().includes(q)||p.size_mm.toLowerCase().includes(q))).slice(0,60)}
-function show(){const rows=visibleProducts();box.innerHTML=rows.map(p=>`<div class="suggestion" data-id="${p.id}"><b>${p.name}</b><small>${p.supplier} · ${p.group} · ${p.weight_kg||'масса не указана'} кг · ${p.price_rub} ₽</small></div>`).join('')||'<div class="suggestion">Совпадений нет</div>';box.style.display='block';box.querySelectorAll('[data-id]').forEach(el=>el.onclick=()=>{const p=catalog.find(x=>x.id===el.dataset.id);input.value=p.name;idField.value=p.id;searchField.value=p.name;box.style.display='none'})}
-input.addEventListener('input',()=>{idField.value='';searchField.value=input.value;show()});input.addEventListener('focus',show);supplier.addEventListener('change',()=>{idField.value='';show()});group.addEventListener('change',()=>{idField.value='';show()});document.addEventListener('click',e=>{if(!e.target.closest('.search-wrap'))box.style.display='none'});document.getElementById('zbiForm').addEventListener('submit',()=>searchField.value=input.value);
-</script></body></html>
-"""
-
-
-@zbi_bp.app_template_filter("money")
-def money(value):
-    return f"{float(value):,.0f}".replace(",", " ")
-
-
-@zbi_bp.route("", methods=["GET", "POST"])
-@zbi_bp.route("/", methods=["GET", "POST"])
-def calculator():
-    products, delivery_rows = load_catalog()
-    suppliers = sorted({item["supplier"] for item in products})
-    groups = sorted({item["group"] for item in products})
-    form = {
-        "address": request.form.get("address", ""),
-        "supplier": request.form.get("supplier", ""),
-        "group": request.form.get("group", ""),
-        "product_id": request.form.get("product_id", ""),
-        "search": request.form.get("search", ""),
-        "quantity": request.form.get("quantity", "1"),
-        "markup": request.form.get("markup", "10"),
-    }
-    error = ""
-    results = []
-    quantity = max(1, int(_float(form["quantity"], 1)))
-    markup = max(0, _float(form["markup"], 0))
-
-    if request.method == "POST":
-        lat, lon = geocode(form["address"])
-        if lat is None:
-            error = "Адрес не найден. Проверьте адрес или введите координаты через запятую."
-        else:
-            candidates = products
-            if form["product_id"]:
-                candidates = [item for item in candidates if item["id"] == form["product_id"]]
-            else:
-                if form["supplier"]:
-                    candidates = [item for item in candidates if item["supplier"] == form["supplier"]]
-                if form["group"]:
-                    candidates = [item for item in candidates if item["group"] == form["group"]]
-                query = form["search"].strip().casefold()
-                if query:
-                    candidates = [item for item in candidates if query in item["name"].casefold() or query in item["size_mm"].casefold()]
-            if not candidates:
-                error = "По выбранным параметрам изделий не найдено."
-            else:
-                supplier_distance = {}
-                for supplier_name in {item["supplier"] for item in candidates}:
-                    rows = [item for item in delivery_rows if item["supplier"] == supplier_name]
-                    if not rows:
-                        continue
-                    distance, kind = road_distance_km(rows[0]["lat"], rows[0]["lon"], lat, lon)
-                    supplier_distance[supplier_name] = (distance, kind, rows)
-                for product in candidates:
-                    info = supplier_distance.get(product["supplier"])
-                    if not info:
-                        continue
-                    distance, kind, options = info
-                    delivery = delivery_calculation(product, quantity, distance, options)
-                    if not delivery:
-                        continue
-                    request_delivered_unit = product["price_rub"] + delivery["request_delivery_unit"]
-                    full_delivered_unit = product["price_rub"] + delivery["full_delivery_unit"]
-                    item = dict(product)
-                    item.update({
-                        "distance": distance,
-                        "distance_kind": kind,
-                        "delivery": delivery,
-                        "request_delivered_unit": request_delivered_unit,
-                        "request_sale_unit": request_delivered_unit * (1 + markup / 100),
-                        "request_sale_total": request_delivered_unit * (1 + markup / 100) * quantity,
-                        "full_delivered_unit": full_delivered_unit,
-                        "full_sale_unit": full_delivered_unit * (1 + markup / 100),
-                        "full_sale_total": full_delivered_unit * (1 + markup / 100) * delivery["units_full"],
-                    })
-                    results.append(item)
-                results.sort(key=lambda item: (item["distance"], item["request_delivered_unit"]))
-                results = results[:50]
-                if not results and not error:
-                    error = "У подходящих изделий не указана масса либо изделие тяжелее доступной машины."
-
-    catalog_for_js = [{key: item[key] for key in ("id", "supplier", "group", "name", "size_mm", "weight_kg", "price_rub")} for item in products]
-    return render_template_string(
-        PAGE,
-        products=products,
-        suppliers=suppliers,
-        groups=groups,
-        form=form,
-        error=error,
-        results=results,
-        quantity=quantity,
-        markup=markup,
-        product_count=len(products),
-        supplier_count=len(suppliers),
-        catalog_json=json.dumps(catalog_for_js, ensure_ascii=False).replace("</", "<\\/"),
-    )
-import csv
-import json
-import math
-import os
-from pathlib import Path
-
-import requests
-from flask import Blueprint, current_app, render_template_string, request
-
-
-zbi_bp = Blueprint("zbi", __name__, url_prefix="/zbi")
-BASE_DIR = Path(__file__).resolve().parent
-PRODUCTS_FILE = BASE_DIR / "zbi_products.csv"
-DELIVERY_FILE = BASE_DIR / "zbi_delivery.csv"
-
-
-def _float(value, default=0.0):
-    try:
-        return float(str(value).replace(" ", "").replace(",", "."))
-    except (TypeError, ValueError):
-        return default
 
 
 def load_catalog():
     with PRODUCTS_FILE.open("r", encoding="utf-8-sig", newline="") as handle:
         products = list(csv.DictReader(handle))
     for index, item in enumerate(products):
+        if item.get("supplier") == "ИП Михайлов" and str(item.get("name") or "").strip().upper().startswith("ПД "):
+            item["group"] = "Лотки и водоотвод"
         item["id"] = str(index)
         item["price_rub"] = _float(item.get("price_rub"))
         item["weight_kg"] = _float(item.get("weight_kg"))
+        item["dimensions"] = parse_dimensions(item.get("size_mm"), item["weight_kg"])
     with DELIVERY_FILE.open("r", encoding="utf-8-sig", newline="") as handle:
         delivery = list(csv.DictReader(handle))
     for item in delivery:
@@ -338,7 +77,6 @@ def geocode(address):
     text = str(address or "").strip()
     if not text:
         return None, None
-    # A coordinate pair is useful on sites where the geocoding key is temporarily unavailable.
     if "," in text:
         parts = [part.strip() for part in text.split(",")]
         if len(parts) == 2:
@@ -364,8 +102,7 @@ def geocode(address):
 
 def haversine_km(lat1, lon1, lat2, lon2):
     radius = 6371.0
-    values = [math.radians(value) for value in (lat1, lon1, lat2, lon2)]
-    lat1, lon1, lat2, lon2 = values
+    lat1, lon1, lat2, lon2 = [math.radians(value) for value in (lat1, lon1, lat2, lon2)]
     dlat, dlon = lat2 - lat1, lon2 - lon1
     value = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return radius * 2 * math.asin(math.sqrt(value))
@@ -384,101 +121,176 @@ def road_distance_km(start_lat, start_lon, end_lat, end_lon):
             return data["routes"][0]["distance"] / 1000, "по автодороге"
     except Exception:
         pass
-    # More realistic than a straight line when the public router is unavailable.
     return haversine_km(start_lat, start_lon, end_lat, end_lon) * 1.25, "оценка по прямой × 1,25"
 
 
-def delivery_calculation(product, quantity, distance, delivery_options):
-    weight = product["weight_kg"]
-    if weight <= 0:
-        return None
+def vehicle_profile(option):
+    name = str(option.get("vehicle") or "").casefold()
+    if "манипулятор" in name:
+        length, width, height = 6.5, 2.45, 2.5
+    else:
+        length, width, height = 13.6, 2.45, 2.5
+    return {
+        "length_m": length,
+        "width_m": width,
+        "height_m": height,
+        "usable_volume_m3": length * width * height * 0.78,
+    }
+
+
+def mixed_delivery_calculation(lines, distance, delivery_options):
+    total_weight_kg = sum(line["weight_total_kg"] for line in lines)
+    total_volume_m3 = sum(line["volume_total_m3"] for line in lines)
     alternatives = []
     for option in delivery_options:
         capacity_kg = option["capacity_t"] * 1000
-        units_full = math.floor(capacity_kg / weight)
-        if units_full < 1:
+        if capacity_kg <= 0:
             continue
-        trips = math.ceil(quantity / units_full)
+        profile = vehicle_profile(option)
+        oversize = []
+        for line in lines:
+            dims = line["dimensions"]
+            if dims["estimated"]:
+                continue
+            if (
+                dims["length_m"] > profile["length_m"]
+                or dims["width_m"] > profile["width_m"]
+                or dims["height_m"] > profile["height_m"]
+            ):
+                oversize.append(line["name"])
+        if oversize:
+            continue
+        weight_trips = max(1, math.ceil(total_weight_kg / capacity_kg))
+        volume_trips = max(1, math.ceil(total_volume_m3 / profile["usable_volume_m3"]))
+        trips = max(weight_trips, volume_trips)
         trip_price = distance * option["rate_rub_km"]
-        request_delivery = trip_price * trips
         alternatives.append({
             "vehicle": option["vehicle"],
             "capacity_t": option["capacity_t"],
-            "rate": option["rate_rub_km"],
-            "units_full": units_full,
+            "rate_rub_km": option["rate_rub_km"],
             "trips": trips,
-            "request_delivery": request_delivery,
-            "request_delivery_unit": request_delivery / quantity,
-            "full_delivery": trip_price,
-            "full_delivery_unit": trip_price / units_full,
+            "weight_trips": weight_trips,
+            "volume_trips": volume_trips,
+            "delivery_total": trip_price * trips,
+            "trip_price": trip_price,
             "loading_address": option["loading_address"],
+            "profile": profile,
+            "weight_load_pct": total_weight_kg / (capacity_kg * trips) * 100,
+            "volume_load_pct": total_volume_m3 / (profile["usable_volume_m3"] * trips) * 100,
+            "limiting_factor": "вес" if weight_trips >= volume_trips else "габаритный объём",
         })
     if not alternatives:
         return None
-    return min(alternatives, key=lambda item: (item["request_delivery"], item["full_delivery_unit"]))
+    return min(alternatives, key=lambda item: (item["delivery_total"], item["trips"], -item["capacity_t"]))
+
+
+def parse_cart(raw_value, product_by_id):
+    try:
+        raw_items = json.loads(raw_value or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw_items = []
+    merged = defaultdict(int)
+    for item in raw_items if isinstance(raw_items, list) else []:
+        product_id = str(item.get("id", ""))
+        quantity = max(1, int(_float(item.get("quantity"), 1)))
+        if product_id in product_by_id:
+            merged[product_id] += quantity
+    return [{"id": product_id, "quantity": quantity} for product_id, quantity in merged.items()]
+
+
+def build_quote(cart, product_by_id, delivery_rows, lat, lon, markup):
+    supplier_lines = defaultdict(list)
+    all_lines = []
+    for cart_item in cart:
+        product = product_by_id[cart_item["id"]]
+        quantity = cart_item["quantity"]
+        dimensions = product["dimensions"]
+        line = dict(product)
+        line.update({
+            "quantity": quantity,
+            "dimensions": dimensions,
+            "weight_total_kg": product["weight_kg"] * quantity,
+            "volume_total_m3": dimensions["volume_m3"] * quantity,
+            "purchase_total": product["price_rub"] * quantity,
+            "sale_unit": product["price_rub"] * (1 + markup / 100),
+            "sale_total": product["price_rub"] * quantity * (1 + markup / 100),
+        })
+        supplier_lines[product["supplier"]].append(line)
+        all_lines.append(line)
+
+    deliveries = []
+    errors = []
+    for supplier, lines in supplier_lines.items():
+        options = [row for row in delivery_rows if row["supplier"] == supplier]
+        if not options:
+            errors.append(f"Для производителя «{supplier}» нет тарифа доставки.")
+            continue
+        distance, distance_kind = road_distance_km(options[0]["lat"], options[0]["lon"], lat, lon)
+        calculation = mixed_delivery_calculation(lines, distance, options)
+        if not calculation:
+            errors.append(f"Заявка производителя «{supplier}» не помещается в доступный транспорт по весу или габаритам.")
+            continue
+        deliveries.append({
+            "supplier": supplier,
+            "lines": lines,
+            "distance": distance,
+            "distance_kind": distance_kind,
+            "weight_total_kg": sum(line["weight_total_kg"] for line in lines),
+            "volume_total_m3": sum(line["volume_total_m3"] for line in lines),
+            **calculation,
+        })
+
+    purchase_total = sum(line["purchase_total"] for line in all_lines)
+    sale_total = sum(line["sale_total"] for line in all_lines)
+    delivery_total = sum(item["delivery_total"] for item in deliveries)
+    return {
+        "lines": all_lines,
+        "deliveries": deliveries,
+        "errors": errors,
+        "purchase_total": purchase_total,
+        "sale_total": sale_total,
+        "delivery_total": delivery_total,
+        "client_total": sale_total + delivery_total,
+        "weight_total_kg": sum(line["weight_total_kg"] for line in all_lines),
+        "volume_total_m3": sum(line["volume_total_m3"] for line in all_lines),
+    }
 
 
 PAGE = r"""
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Калькулятор ЖБИ</title>
-  <style>
-    :root{--ink:#18202a;--muted:#647184;--blue:#185bd8;--line:#dce3ec;--bg:#f3f6fa;--ok:#e9f8ef}
-    *{box-sizing:border-box} body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}
-    .wrap{max-width:1280px;margin:auto}.card{background:white;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}
-    h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}
-    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.wide{grid-column:span 2}
-    label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}
-    button{background:var(--blue);border-color:var(--blue);color:white;font-weight:700;cursor:pointer}.hint,.muted{color:var(--muted);font-size:13px}
-    .search-wrap{position:relative}.suggestions{position:absolute;z-index:5;left:0;right:0;top:74px;max-height:320px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 28px #10203026;display:none}
-    .suggestion{padding:10px 12px;border-bottom:1px solid #edf0f4;cursor:pointer}.suggestion:hover{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px}
-    .summary{background:var(--ok);border:1px solid #bfe5cc}.result{border:1px solid var(--line);border-radius:14px;padding:18px;margin-top:14px}.result.best{border:2px solid #2a9d5b}
-    .badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}
-    table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1}th{font-size:12px;color:var(--muted)}
-    .money{font-weight:800;white-space:nowrap}.warning{background:#fff6df;border:1px solid #f0d58a;padding:13px;border-radius:10px}
-    @media(max-width:850px){body{padding:12px}.grid{grid-template-columns:1fr}.wide{grid-column:span 1}.table-wrap{overflow:auto}}
-  </style>
-</head>
-<body><div class="wrap">
-  <div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/carriers">Перевозчики</a></div>
-  <div class="card">
-    <h1>Калькулятор ЖБИ</h1>
-    <p class="muted">В каталоге {{ product_count }} позиций от {{ supplier_count }} производителей. Тариф и грузоподъёмность берутся только из листа «Доставка».</p>
-    <form method="post" id="zbiForm">
-      <div class="grid">
-        <div class="wide"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required><div class="hint">Можно также ввести координаты: 55.75, 37.62</div></div>
-        <div><label>Производитель</label><select name="supplier" id="supplier"><option value="">Любой — найти ближайшего</option>{% for item in suppliers %}<option value="{{ item }}" {% if form.supplier==item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></div>
-        <div><label>Группа изделий</label><select name="group" id="group"><option value="">Все ЖБИ / любое изделие</option>{% for item in groups %}<option value="{{ item }}" {% if form.group==item %}selected{% endif %}>{{ item }} — любые</option>{% endfor %}</select></div>
-        <div class="wide search-wrap"><label>Поиск и выбор изделия</label><input id="productSearch" autocomplete="off" value="{{ form.search }}" placeholder="Например: кольцо КС 15-9 или бордюр"><input type="hidden" name="product_id" id="productId" value="{{ form.product_id }}"><input type="hidden" name="search" id="searchValue" value="{{ form.search }}"><div class="suggestions" id="suggestions"></div><div class="hint">Можно выбрать точную позицию или написать часть названия и оставить без выбора.</div></div>
-        <div><label>Количество, шт.</label><input type="number" min="1" step="1" name="quantity" value="{{ form.quantity }}" required></div>
-        <div><label>Наценка менеджера, %</label><input type="number" min="0" step="0.1" name="markup" value="{{ form.markup }}" required></div>
-        <div><label>&nbsp;</label><button type="submit">Рассчитать стоимость</button></div>
-      </div>
-    </form>
-  </div>
-  {% if error %}<div class="card warning"><b>Не удалось выполнить расчёт.</b> {{ error }}</div>{% endif %}
-  {% if results %}
-  <div class="card summary"><h2>Рекомендация</h2><p>Ближайший подходящий производитель: <b>{{ results[0].supplier }}</b>, расстояние {{ results[0].distance|round(1) }} км. Ниже показана закупка, доставка и продажа с наценкой {{ markup }}%.</p></div>
-  <div class="card"><h2>Подходящие варианты</h2><p class="muted">Сначала ближайшие производители, внутри одного производителя — меньшая стоимость единицы с доставкой. Показано до 50 вариантов.</p>
-  {% for item in results %}<article class="result {% if loop.first %}best{% endif %}">
-    <h3>{{ item.name }}</h3><div class="badges"><span class="badge">{{ item.supplier }}</span><span class="badge">{{ item.group }}</span><span class="badge">{{ item.weight_kg|round(1) }} кг/шт.</span><span class="badge">{{ item.distance|round(1) }} км · {{ item.distance_kind }}</span></div>
-    <div class="muted">{{ item.size_mm }}{% if item.note %} · {{ item.note }}{% endif %}</div>
-    <div class="table-wrap"><table><thead><tr><th>Сценарий</th><th>Количество</th><th>Машина</th><th>Рейсов</th><th>Доставка</th><th>Закупка с доставкой, 1 шт.</th><th>Продажа, 1 шт.</th><th>Продажа всего</th></tr></thead><tbody>
-      <tr><td>Заявка менеджера</td><td>{{ quantity }}</td><td>{{ item.delivery.vehicle }} · {{ item.delivery.capacity_t|round(0)|int }} т</td><td>{{ item.delivery.trips }}</td><td class="money">{{ item.delivery.request_delivery|money }} ₽</td><td class="money">{{ item.request_delivered_unit|money }} ₽</td><td class="money">{{ item.request_sale_unit|money }} ₽</td><td class="money">{{ item.request_sale_total|money }} ₽</td></tr>
-      <tr><td>Полная загрузка</td><td>{{ item.delivery.units_full }}</td><td>{{ item.delivery.vehicle }} · {{ item.delivery.capacity_t|round(0)|int }} т</td><td>1</td><td class="money">{{ item.delivery.full_delivery|money }} ₽</td><td class="money">{{ item.full_delivered_unit|money }} ₽</td><td class="money">{{ item.full_sale_unit|money }} ₽</td><td class="money">{{ item.full_sale_total|money }} ₽</td></tr>
-    </tbody></table></div>
-    <p class="muted">Цена завода: {{ item.price_rub|money }} ₽/шт. · Тариф: {{ item.delivery.rate|money }} ₽/км · Загрузка: {{ item.delivery.loading_address }}</p>
-  </article>{% endfor %}</div>
-  {% endif %}
-</div>
-<script>
-const catalog={{ catalog_json|safe }}; const supplier=document.getElementById('supplier'); const group=document.getElementById('group'); const input=document.getElementById('productSearch'); const box=document.getElementById('suggestions'); const idField=document.getElementById('productId'); const searchField=document.getElementById('searchValue');
-function visibleProducts(){const q=input.value.trim().toLowerCase();return catalog.filter(p=>(!supplier.value||p.supplier===supplier.value)&&(!group.value||p.group===group.value)&&(!q||p.name.toLowerCase().includes(q)||p.size_mm.toLowerCase().includes(q))).slice(0,60)}
-function show(){const rows=visibleProducts();box.innerHTML=rows.map(p=>`<div class="suggestion" data-id="${p.id}"><b>${p.name}</b><small>${p.supplier} · ${p.group} · ${p.weight_kg||'масса не указана'} кг · ${p.price_rub} ₽</small></div>`).join('')||'<div class="suggestion">Совпадений нет</div>';box.style.display='block';box.querySelectorAll('[data-id]').forEach(el=>el.onclick=()=>{const p=catalog.find(x=>x.id===el.dataset.id);input.value=p.name;idField.value=p.id;searchField.value=p.name;box.style.display='none'})}
-input.addEventListener('input',()=>{idField.value='';searchField.value=input.value;show()});input.addEventListener('focus',show);supplier.addEventListener('change',()=>{idField.value='';show()});group.addEventListener('change',()=>{idField.value='';show()});document.addEventListener('click',e=>{if(!e.target.closest('.search-wrap'))box.style.display='none'});document.getElementById('zbiForm').addEventListener('submit',()=>searchField.value=input.value);
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Калькулятор заявки ЖБИ</title>
+<style>
+:root{--ink:#18202a;--muted:#647184;--blue:#185bd8;--line:#dce3ec;--bg:#f3f6fa;--ok:#e9f8ef;--danger:#a62d2d}
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1380px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}.span4{grid-column:span 4}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.remove{background:#fff;color:var(--danger);border-color:#e6bcbc;padding:7px;min-height:34px}.hint,.muted{color:var(--muted);font-size:13px}.search-wrap{position:relative}.suggestions{position:absolute;z-index:20;left:0;right:0;top:74px;max-height:320px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 28px #10203026;display:none}.suggestion{padding:10px 12px;border-bottom:1px solid #edf0f4;cursor:pointer}.suggestion:hover{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:#fff6df;border:1px solid #f0d58a}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{background:#f5f8fc;border-radius:12px;padding:14px}.kpi b{display:block;font-size:22px;margin-top:4px}.delivery{border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:12px}.badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1;vertical-align:top}th{font-size:12px;color:var(--muted)}.money{font-weight:800;white-space:nowrap}.empty{text-align:center;color:var(--muted);padding:24px}.actions{display:flex;gap:10px;align-items:end}.actions>*{flex:1}
+@media(max-width:900px){body{padding:12px}.grid{grid-template-columns:1fr}.span2,.span4{grid-column:span 1}.kpis{grid-template-columns:1fr 1fr}.actions{display:block}.actions>*{margin-top:8px}}
+</style></head><body><div class="wrap">
+<div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/carriers">Перевозчики</a></div>
+<div class="card"><h1>Расчёт заявки ЖБИ</h1><p class="muted">Добавьте несколько изделий. Машина и количество рейсов определяются по суммарному весу и транспортным габаритам. Товары разных производителей рассчитываются отдельными доставками.</p>
+<form method="post" id="quoteForm"><input type="hidden" name="items_json" id="itemsJson">
+<div class="grid"><div class="span2"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required></div><div><label>Наценка на товары, %</label><input type="number" min="0" step="0.1" name="markup" value="{{ form.markup }}" required></div><div><label>&nbsp;</label><button type="submit">Рассчитать всю заявку</button></div></div>
+</form></div>
+<div class="card"><h2>Добавить изделие</h2><div class="grid">
+<div><label>Производитель</label><select id="supplier"><option value="">Любой производитель</option>{% for item in suppliers %}<option value="{{ item }}">{{ item }}</option>{% endfor %}</select></div>
+<div><label>Раздел</label><select id="group"><option value="">Все изделия / любые</option>{% for item in groups %}<option value="{{ item }}">{{ item }} — любые</option>{% endfor %}</select></div>
+<div class="span2 search-wrap"><label>Поиск изделия</label><input id="productSearch" autocomplete="off" placeholder="Например: ФБС 24.4.6, 2П 30.18 или лоток"><div id="suggestions" class="suggestions"></div></div>
+<div><label>Количество, шт.</label><input id="addQuantity" type="number" min="1" step="1" value="1"></div><div class="span2"><label>Выбрано</label><input id="selectedName" readonly placeholder="Сначала выберите позицию из подсказки"></div><div><label>&nbsp;</label><button type="button" id="addItem">Добавить в заявку</button></div>
+</div></div>
+<div class="card"><h2>Состав заявки</h2><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Производитель</th><th>Габариты</th><th>Масса 1 шт.</th><th>Количество</th><th>Общая масса</th><th>Цена завода без доставки</th><th></th></tr></thead><tbody id="cartBody"></tbody></table></div><div id="emptyCart" class="empty">В заявке пока нет изделий</div></div>
+{% if error %}<div class="card warning"><b>Не удалось выполнить расчёт.</b> {{ error }}</div>{% endif %}
+{% if quote %}
+<div class="card summary"><h2>Итог заявки</h2><div class="kpis"><div class="kpi">Товары по закупке<b>{{ quote.purchase_total|money }} ₽</b><span class="muted">без доставки</span></div><div class="kpi">Продажа товаров<b>{{ quote.sale_total|money }} ₽</b><span class="muted">с наценкой {{ markup }}%, без доставки</span></div><div class="kpi">Доставка отдельно<b>{{ quote.delivery_total|money }} ₽</b><span class="muted">до объекта</span></div><div class="kpi">Итого клиенту<b>{{ quote.client_total|money }} ₽</b><span class="muted">товары + доставка</span></div></div><p><b>Общая масса:</b> {{ quote.weight_total_kg|round(0)|int }} кг · <b>транспортный габаритный объём:</b> {{ quote.volume_total_m3|round(2) }} м³</p></div>
+<div class="card"><h2>Цена изделий без доставки</h2><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Кол-во</th><th>Габариты</th><th>Масса</th><th>Цена завода за 1 шт.</th><th>Цена продажи за 1 шт.</th><th>Продажа всего</th></tr></thead><tbody>{% for line in quote.lines %}<tr><td><b>{{ line.name }}</b><div class="muted">{{ line.supplier }} · {{ line.group }}</div></td><td>{{ line.quantity }}</td><td>{{ line.size_mm }}{% if line.dimensions.estimated %}<div class="muted">объём оценён по массе</div>{% endif %}</td><td>{{ line.weight_kg|round(1) }} кг/шт.<br><b>{{ line.weight_total_kg|round(0)|int }} кг всего</b></td><td class="money">{{ line.price_rub|money }} ₽</td><td class="money">{{ line.sale_unit|money }} ₽</td><td class="money">{{ line.sale_total|money }} ₽</td></tr>{% endfor %}</tbody></table></div></div>
+<div class="card"><h2>Доставка до объекта — отдельно</h2>{% for item in quote.deliveries %}<div class="delivery"><h3>{{ item.supplier }}</h3><div class="badges"><span class="badge">{{ item.vehicle }} · {{ item.capacity_t|round(0)|int }} т</span><span class="badge">{{ item.trips }} рейс(а)</span><span class="badge">{{ item.distance|round(1) }} км · {{ item.distance_kind }}</span><span class="badge">ограничение: {{ item.limiting_factor }}</span></div><p><b>{{ item.delivery_total|money }} ₽ за доставку</b> · {{ item.rate_rub_km|money }} ₽/км · масса {{ item.weight_total_kg|round(0)|int }} кг · габаритный объём {{ item.volume_total_m3|round(2) }} м³</p><p class="muted">Средняя загрузка одного рейса: по массе {{ item.weight_load_pct|round(0)|int }}%, по объёму {{ item.volume_load_pct|round(0)|int }}%. Погрузка: {{ item.loading_address }}</p></div>{% endfor %}{% for message in quote.errors %}<div class="warning">{{ message }}</div>{% endfor %}</div>
+{% endif %}
+</div><script>
+const catalog={{ catalog_json|safe }};let cart={{ cart_json|safe }};let selectedId='';
+const supplier=document.getElementById('supplier'),group=document.getElementById('group'),search=document.getElementById('productSearch'),box=document.getElementById('suggestions'),selectedName=document.getElementById('selectedName'),qty=document.getElementById('addQuantity'),body=document.getElementById('cartBody'),empty=document.getElementById('emptyCart'),itemsJson=document.getElementById('itemsJson');
+const esc=s=>String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+function filtered(){const q=search.value.trim().toLowerCase();if(q.length<2)return[];return catalog.filter(p=>(!supplier.value||p.supplier===supplier.value)&&(!group.value||p.group===group.value)&&(p.name.toLowerCase().includes(q)||p.size_mm.toLowerCase().includes(q))).slice(0,50)}
+function show(){const rows=filtered();if(search.value.trim().length<2){box.style.display='none';return}box.innerHTML=rows.map(p=>`<div class="suggestion" data-id="${p.id}"><b>${esc(p.name)}</b><small>${esc(p.supplier)} · ${esc(p.group)} · ${esc(p.size_mm)} · ${p.weight_kg||'масса не указана'} кг · ${p.price_rub} ₽</small></div>`).join('')||'<div class="suggestion">Совпадений нет</div>';box.style.display='block';box.querySelectorAll('[data-id]').forEach(el=>el.onclick=()=>{const p=catalog.find(x=>x.id===el.dataset.id);selectedId=p.id;selectedName.value=p.name;search.value=p.name;box.style.display='none'})}
+function resetSearch(){selectedId='';selectedName.value='';search.value='';box.style.display='none'}supplier.addEventListener('change',resetSearch);group.addEventListener('change',resetSearch);search.addEventListener('input',()=>{selectedId='';selectedName.value='';show()});search.addEventListener('focus',show);document.addEventListener('click',e=>{if(!e.target.closest('.search-wrap'))box.style.display='none'});
+function render(){body.innerHTML=cart.map((item,i)=>{const p=catalog.find(x=>x.id===item.id);const total=p.weight_kg*item.quantity;return`<tr><td><b>${esc(p.name)}</b><div class="muted">${esc(p.group)}</div></td><td>${esc(p.supplier)}</td><td>${esc(p.size_mm)}</td><td>${p.weight_kg} кг</td><td><input class="cartQty" data-index="${i}" type="number" min="1" step="1" value="${item.quantity}"></td><td><b>${Math.round(total)} кг</b></td><td class="money">${Math.round(p.price_rub).toLocaleString('ru-RU')} ₽/шт.</td><td><button type="button" class="remove" data-index="${i}">Удалить</button></td></tr>`}).join('');empty.style.display=cart.length?'none':'block';itemsJson.value=JSON.stringify(cart);document.querySelectorAll('.cartQty').forEach(el=>el.onchange=()=>{cart[+el.dataset.index].quantity=Math.max(1,parseInt(el.value)||1);render()});document.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{cart.splice(+el.dataset.index,1);render()})}
+document.getElementById('addItem').onclick=()=>{if(!selectedId){alert('Выберите точное изделие из подсказки');return}const amount=Math.max(1,parseInt(qty.value)||1);const old=cart.find(x=>x.id===selectedId);if(old)old.quantity+=amount;else cart.push({id:selectedId,quantity:amount});qty.value=1;resetSearch();render()};document.getElementById('quoteForm').onsubmit=e=>{if(!cart.length){e.preventDefault();alert('Добавьте хотя бы одно изделие в заявку');return}itemsJson.value=JSON.stringify(cart)};render();
 </script></body></html>
 """
 
@@ -492,88 +304,37 @@ def money(value):
 @zbi_bp.route("/", methods=["GET", "POST"])
 def calculator():
     products, delivery_rows = load_catalog()
-    suppliers = sorted({item["supplier"] for item in products})
-    groups = sorted({item["group"] for item in products})
+    product_by_id = {item["id"]: item for item in products}
     form = {
         "address": request.form.get("address", ""),
-        "supplier": request.form.get("supplier", ""),
-        "group": request.form.get("group", ""),
-        "product_id": request.form.get("product_id", ""),
-        "search": request.form.get("search", ""),
-        "quantity": request.form.get("quantity", "1"),
         "markup": request.form.get("markup", "10"),
     }
-    error = ""
-    results = []
-    quantity = max(1, int(_float(form["quantity"], 1)))
     markup = max(0, _float(form["markup"], 0))
-
+    cart = parse_cart(request.form.get("items_json", "[]"), product_by_id)
+    quote = None
+    error = ""
     if request.method == "POST":
-        lat, lon = geocode(form["address"])
-        if lat is None:
-            error = "Адрес не найден. Проверьте адрес или введите координаты через запятую."
+        if not cart:
+            error = "Добавьте хотя бы одно изделие в заявку."
         else:
-            candidates = products
-            if form["product_id"]:
-                candidates = [item for item in candidates if item["id"] == form["product_id"]]
+            lat, lon = geocode(form["address"])
+            if lat is None:
+                error = "Адрес не найден. Проверьте адрес или введите координаты через запятую."
             else:
-                if form["supplier"]:
-                    candidates = [item for item in candidates if item["supplier"] == form["supplier"]]
-                if form["group"]:
-                    candidates = [item for item in candidates if item["group"] == form["group"]]
-                query = form["search"].strip().casefold()
-                if query:
-                    candidates = [item for item in candidates if query in item["name"].casefold() or query in item["size_mm"].casefold()]
-            if not candidates:
-                error = "По выбранным параметрам изделий не найдено."
-            else:
-                supplier_distance = {}
-                for supplier_name in {item["supplier"] for item in candidates}:
-                    rows = [item for item in delivery_rows if item["supplier"] == supplier_name]
-                    if not rows:
-                        continue
-                    distance, kind = road_distance_km(rows[0]["lat"], rows[0]["lon"], lat, lon)
-                    supplier_distance[supplier_name] = (distance, kind, rows)
-                for product in candidates:
-                    info = supplier_distance.get(product["supplier"])
-                    if not info:
-                        continue
-                    distance, kind, options = info
-                    delivery = delivery_calculation(product, quantity, distance, options)
-                    if not delivery:
-                        continue
-                    request_delivered_unit = product["price_rub"] + delivery["request_delivery_unit"]
-                    full_delivered_unit = product["price_rub"] + delivery["full_delivery_unit"]
-                    item = dict(product)
-                    item.update({
-                        "distance": distance,
-                        "distance_kind": kind,
-                        "delivery": delivery,
-                        "request_delivered_unit": request_delivered_unit,
-                        "request_sale_unit": request_delivered_unit * (1 + markup / 100),
-                        "request_sale_total": request_delivered_unit * (1 + markup / 100) * quantity,
-                        "full_delivered_unit": full_delivered_unit,
-                        "full_sale_unit": full_delivered_unit * (1 + markup / 100),
-                        "full_sale_total": full_delivered_unit * (1 + markup / 100) * delivery["units_full"],
-                    })
-                    results.append(item)
-                results.sort(key=lambda item: (item["distance"], item["request_delivered_unit"]))
-                results = results[:50]
-                if not results and not error:
-                    error = "У подходящих изделий не указана масса либо изделие тяжелее доступной машины."
-
-    catalog_for_js = [{key: item[key] for key in ("id", "supplier", "group", "name", "size_mm", "weight_kg", "price_rub")} for item in products]
+                quote = build_quote(cart, product_by_id, delivery_rows, lat, lon, markup)
+                if not quote["deliveries"]:
+                    error = "Не удалось подобрать транспорт ни для одного производителя."
+    catalog_for_js = [{
+        key: item[key] for key in ("id", "supplier", "group", "name", "size_mm", "weight_kg", "price_rub")
+    } for item in products]
     return render_template_string(
         PAGE,
-        products=products,
-        suppliers=suppliers,
-        groups=groups,
+        suppliers=sorted({item["supplier"] for item in products}),
+        groups=sorted({item["group"] for item in products}),
         form=form,
-        error=error,
-        results=results,
-        quantity=quantity,
         markup=markup,
-        product_count=len(products),
-        supplier_count=len(suppliers),
+        quote=quote,
+        error=error,
         catalog_json=json.dumps(catalog_for_js, ensure_ascii=False).replace("</", "<\\/"),
+        cart_json=json.dumps(cart, ensure_ascii=False).replace("</", "<\\/"),
     )
