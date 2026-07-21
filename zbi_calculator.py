@@ -14,6 +14,8 @@ zbi_bp = Blueprint("zbi", __name__, url_prefix="/zbi")
 BASE_DIR = Path(__file__).resolve().parent
 PRODUCTS_FILE = BASE_DIR / "zbi_products.csv"
 DELIVERY_FILE = BASE_DIR / "zbi_delivery.csv"
+MOSCOW_CENTER_LAT = 55.7558
+MOSCOW_CENTER_LON = 37.6176
 
 
 def _float(value, default=0.0):
@@ -68,7 +70,7 @@ def load_catalog():
     with DELIVERY_FILE.open("r", encoding="utf-8-sig", newline="") as handle:
         delivery = list(csv.DictReader(handle))
     for item in delivery:
-        for key in ("capacity_t", "rate_rub_km", "lat", "lon"):
+        for key in ("capacity_t", "fixed_moscow_rub", "rate_rub_km", "lat", "lon"):
             item[key] = _float(item.get(key))
     return products, delivery
 
@@ -76,16 +78,16 @@ def load_catalog():
 def geocode(address):
     text = str(address or "").strip()
     if not text:
-        return None, None
+        return None, None, False
     if "," in text:
         parts = [part.strip() for part in text.split(",")]
         if len(parts) == 2:
             lat, lon = _float(parts[0], None), _float(parts[1], None)
             if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
-                return lat, lon
+                return lat, lon, is_moscow_point(lat, lon)
     api_key = current_app.config.get("YANDEX_API_KEY") or os.getenv("YANDEX_API_KEY", "")
     if not api_key:
-        return None, None
+        return None, None, False
     try:
         response = requests.get(
             "https://geocode-maps.yandex.ru/1.x/",
@@ -94,10 +96,19 @@ def geocode(address):
         )
         response.raise_for_status()
         member = response.json()["response"]["GeoObjectCollection"]["featureMember"][0]
-        lon, lat = member["GeoObject"]["Point"]["pos"].split()
-        return float(lat), float(lon)
+        geo_object = member["GeoObject"]
+        lon, lat = geo_object["Point"]["pos"].split()
+        components = (
+            geo_object.get("metaDataProperty", {})
+            .get("GeocoderMetaData", {})
+            .get("Address", {})
+            .get("Components", [])
+        )
+        names = {str(component.get("name", "")).strip().casefold() for component in components}
+        is_moscow = "москва" in names or "город москва" in names
+        return float(lat), float(lon), is_moscow
     except Exception:
-        return None, None
+        return None, None, False
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -106,6 +117,18 @@ def haversine_km(lat1, lon1, lat2, lon2):
     dlat, dlon = lat2 - lat1, lon2 - lon1
     value = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return radius * 2 * math.asin(math.sqrt(value))
+
+
+def is_moscow_point(lat, lon):
+    """Fallback for coordinates entered without an address.
+
+    The main city is approximated by the MKAD radius; the second area covers
+    the principal New Moscow corridor. Normal text addresses use the Yandex
+    administrative region returned by the geocoder instead.
+    """
+    inside_mkad = haversine_km(lat, lon, MOSCOW_CENTER_LAT, MOSCOW_CENTER_LON) <= 24
+    inside_new_moscow = 55.20 <= lat <= 55.62 and 36.80 <= lon <= 37.62
+    return inside_mkad or inside_new_moscow
 
 
 def road_distance_km(start_lat, start_lon, end_lat, end_lon):
@@ -138,7 +161,7 @@ def vehicle_profile(option):
     }
 
 
-def mixed_delivery_calculation(lines, distance, delivery_options):
+def mixed_delivery_calculation(lines, distance, delivery_options, is_moscow, moscow_base_distance):
     total_weight_kg = sum(line["weight_total_kg"] for line in lines)
     total_volume_m3 = sum(line["volume_total_m3"] for line in lines)
     alternatives = []
@@ -163,11 +186,19 @@ def mixed_delivery_calculation(lines, distance, delivery_options):
         weight_trips = max(1, math.ceil(total_weight_kg / capacity_kg))
         volume_trips = max(1, math.ceil(total_volume_m3 / profile["usable_volume_m3"]))
         trips = max(weight_trips, volume_trips)
-        trip_price = distance * option["rate_rub_km"]
+        extra_km = 0 if is_moscow else max(0, distance - moscow_base_distance)
+        trip_price = option["fixed_moscow_rub"] + extra_km * option["rate_rub_km"]
         alternatives.append({
             "vehicle": option["vehicle"],
             "capacity_t": option["capacity_t"],
             "rate_rub_km": option["rate_rub_km"],
+            "fixed_moscow_rub": option["fixed_moscow_rub"],
+            "moscow_base_distance": moscow_base_distance,
+            "extra_km": extra_km,
+            "pricing_kind": "фиксированный тариф по Москве" if is_moscow else (
+                "фиксированный тариф + километры сверх пути до Москвы" if extra_km > 0
+                else "фиксированный тариф (маршрут не длиннее пути до Москвы)"
+            ),
             "trips": trips,
             "weight_trips": weight_trips,
             "volume_trips": volume_trips,
@@ -213,7 +244,7 @@ def parse_vehicle_overrides(raw_value, delivery_rows):
     }
 
 
-def build_quote(cart, product_by_id, delivery_rows, lat, lon, markup, vehicle_overrides=None):
+def build_quote(cart, product_by_id, delivery_rows, lat, lon, markup, is_moscow=False, vehicle_overrides=None):
     vehicle_overrides = vehicle_overrides or {}
     supplier_lines = defaultdict(list)
     all_lines = []
@@ -246,9 +277,14 @@ def build_quote(cart, product_by_id, delivery_rows, lat, lon, markup, vehicle_ov
             errors.append(f"Для производителя «{supplier}» нет тарифа доставки.")
             continue
         distance, distance_kind = road_distance_km(options[0]["lat"], options[0]["lon"], lat, lon)
+        moscow_base_distance, _ = road_distance_km(
+            options[0]["lat"], options[0]["lon"], MOSCOW_CENTER_LAT, MOSCOW_CENTER_LON
+        )
         selected_vehicle = vehicle_overrides.get(supplier)
         selected_options = [row for row in options if row["vehicle"] == selected_vehicle] if selected_vehicle else options
-        calculation = mixed_delivery_calculation(lines, distance, selected_options)
+        calculation = mixed_delivery_calculation(
+            lines, distance, selected_options, is_moscow, moscow_base_distance
+        )
         if not calculation:
             errors.append(f"Заявка производителя «{supplier}» не помещается в доступный транспорт по весу или габаритам.")
             continue
@@ -326,7 +362,7 @@ PAGE = r"""
 {% if quote %}
 <div class="card summary"><h2>Итог заявки</h2><div class="kpis"><div class="kpi">Товары по закупке<b>{{ quote.purchase_total|money }} ₽</b><span class="muted">без доставки</span></div><div class="kpi">Закупка с доставкой<b>{{ quote.purchase_with_delivery_total|money }} ₽</b><span class="muted">товары + доставка</span></div><div class="kpi">Доставка отдельно<b>{{ quote.delivery_total|money }} ₽</b><span class="muted">до объекта</span></div><div class="kpi">Цена клиенту<b>{{ quote.client_total|money }} ₽</b><span class="muted">с наценкой {{ markup }}% на полную стоимость</span></div></div><p><b>Общая масса:</b> {{ quote.weight_total_kg|round(0)|int }} кг · <b>транспортный габаритный объём:</b> {{ quote.volume_total_m3|round(2) }} м³</p></div>
 <div class="card"><h2>Стоимость каждой позиции</h2><p class="muted">Доставка распределяется между изделиями одного производителя пропорционально их массе.</p><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Кол-во</th><th>Габариты и масса</th><th>Завод за 1 шт.</th><th>Доставка на 1 шт.</th><th>Закупка за 1 шт. с доставкой</th><th>Цена клиенту за 1 шт.</th><th>Клиенту всего</th></tr></thead><tbody>{% for line in quote.lines %}<tr><td><b>{{ line.name }}</b><div class="muted">{{ line.supplier }} · {{ line.group }}</div></td><td>{{ line.quantity }}</td><td>{{ line.size_mm }}<br>{{ line.weight_kg|round(1) }} кг/шт.{% if line.dimensions.estimated %}<div class="muted">объём оценён по массе</div>{% endif %}</td><td class="money">{{ line.price_rub|money }} ₽</td><td class="money">{{ line.delivery_unit|money }} ₽</td><td class="money">{{ line.purchase_with_delivery_unit|money }} ₽</td><td class="money">{{ line.client_unit|money }} ₽<div class="muted">наценка {{ markup }}%</div></td><td class="money">{{ line.client_line_total|money }} ₽</td></tr>{% endfor %}</tbody></table></div></div>
-<div class="card"><h2>Доставка до объекта — отдельно</h2>{% for item in quote.deliveries %}<div class="delivery"><h3>{{ item.supplier }}</h3><div class="badges"><span class="badge">{{ item.vehicle }} · {{ item.capacity_t|round(0)|int }} т</span><span class="badge">{{ item.trips }} рейс(а)</span><span class="badge">{{ item.distance|round(1) }} км · {{ item.distance_kind }}</span><span class="badge">ограничение: {{ item.limiting_factor }}</span></div><p><b>{{ item.delivery_total|money }} ₽ за доставку</b> · {{ item.rate_rub_km|money }} ₽/км · масса {{ item.weight_total_kg|round(0)|int }} кг · габаритный объём {{ item.volume_total_m3|round(2) }} м³</p><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Всего</th><th>На один рейс</th></tr></thead><tbody>{% for line in item.lines %}<tr><td>{{ line.name }}</td><td>{{ line.quantity }} шт.</td><td><b>{{ line.quantity_per_trip }}</b></td></tr>{% endfor %}</tbody></table></div><p class="muted">Средняя загрузка одного рейса: по массе {{ item.weight_load_pct|round(0)|int }}%, по объёму {{ item.volume_load_pct|round(0)|int }}%. Погрузка: {{ item.loading_address }}</p></div>{% endfor %}{% for message in quote.errors %}<div class="warning">{{ message }}</div>{% endfor %}</div>
+<div class="card"><h2>Доставка до объекта — отдельно</h2>{% for item in quote.deliveries %}<div class="delivery"><h3>{{ item.supplier }}</h3><div class="badges"><span class="badge">{{ item.vehicle }} · {{ item.capacity_t|round(0)|int }} т</span><span class="badge">{{ item.trips }} рейс(а)</span><span class="badge">{{ item.distance|round(1) }} км · {{ item.distance_kind }}</span><span class="badge">{{ item.pricing_kind }}</span><span class="badge">ограничение: {{ item.limiting_factor }}</span></div><p><b>{{ item.delivery_total|money }} ₽ за доставку</b> · фиксированно до Москвы {{ item.fixed_moscow_rub|money }} ₽/рейс{% if item.extra_km > 0 %} + {{ item.extra_km|round(1) }} км × {{ item.rate_rub_km|money }} ₽/км{% endif %} · масса {{ item.weight_total_kg|round(0)|int }} кг · габаритный объём {{ item.volume_total_m3|round(2) }} м³</p><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Всего</th><th>На один рейс</th></tr></thead><tbody>{% for line in item.lines %}<tr><td>{{ line.name }}</td><td>{{ line.quantity }} шт.</td><td><b>{{ line.quantity_per_trip }}</b></td></tr>{% endfor %}</tbody></table></div><p class="muted">Средняя загрузка одного рейса: по массе {{ item.weight_load_pct|round(0)|int }}%, по объёму {{ item.volume_load_pct|round(0)|int }}%. Погрузка: {{ item.loading_address }}</p></div>{% endfor %}{% for message in quote.errors %}<div class="warning">{{ message }}</div>{% endfor %}</div>
 {% endif %}
 </div><script>
 const catalog={{ catalog_json|safe }},deliveryCatalog={{ delivery_json|safe }};
@@ -340,7 +376,7 @@ function filtered(){const q=search.value.trim().toLowerCase();if(!group.value&&q
 function show(){const rows=filtered();productCount.textContent=rows.length?`${rows.length} позиций`:(group.value||search.value.trim().length>=2?'0 позиций':'Выберите раздел или введите минимум 2 символа');box.innerHTML=rows.map(p=>`<button type="button" class="suggestion${p.id===selectedId?' selected':''}" data-id="${p.id}"><b>${esc(p.name)}</b><small>${esc(p.supplier)} · ${esc(p.group)} · ${esc(p.size_mm)} · ${p.weight_kg||'масса не указана'} кг · ${p.price_rub} ₽</small></button>`).join('')||'<div class="empty">Изделия появятся здесь после выбора раздела</div>';box.querySelectorAll('[data-id]').forEach(el=>el.onclick=()=>{const p=catalog.find(x=>x.id===el.dataset.id);selectedId=p.id;selectedName.value=`${p.name} — ${p.supplier}`;show()})}
 function resetSelection(clearSearch=true){selectedId='';selectedName.value='';if(clearSearch)search.value='';show()}
 supplier.addEventListener('change',()=>resetSelection());group.addEventListener('change',()=>resetSelection());search.addEventListener('input',()=>resetSelection(false));
-function renderTransport(){const suppliers=[...new Set(cart.map(item=>catalog.find(p=>p.id===item.id)?.supplier).filter(Boolean))];Object.keys(vehicleOverrides).forEach(name=>{if(!suppliers.includes(name))delete vehicleOverrides[name]});transportChoices.innerHTML=suppliers.map(name=>{const options=deliveryCatalog.filter(row=>row.supplier===name);if(!options.length)return`<div class="transport-choice"><b>${esc(name)}</b><div class="muted">Нет тарифа доставки</div></div>`;if(!options.some(row=>row.vehicle===vehicleOverrides[name]))vehicleOverrides[name]=options[0].vehicle;return`<div class="transport-choice"><label>Транспорт: ${esc(name)}</label><select class="vehicleChoice" data-supplier="${esc(name)}">${options.map(row=>`<option value="${esc(row.vehicle)}"${row.vehicle===vehicleOverrides[name]?' selected':''}>${esc(row.vehicle)} · ${row.capacity_t} т · ${row.rate_rub_km} ₽/км</option>`).join('')}</select></div>`}).join('');transportHint.style.display=suppliers.length?'none':'block';transportChoices.querySelectorAll('.vehicleChoice').forEach(el=>el.onchange=()=>{vehicleOverrides[el.dataset.supplier]=el.value;sync();scheduleRecalculate()});sync()}
+function renderTransport(){const suppliers=[...new Set(cart.map(item=>catalog.find(p=>p.id===item.id)?.supplier).filter(Boolean))];Object.keys(vehicleOverrides).forEach(name=>{if(!suppliers.includes(name))delete vehicleOverrides[name]});transportChoices.innerHTML=suppliers.map(name=>{const options=deliveryCatalog.filter(row=>row.supplier===name);if(!options.length)return`<div class="transport-choice"><b>${esc(name)}</b><div class="muted">Нет тарифа доставки</div></div>`;if(!options.some(row=>row.vehicle===vehicleOverrides[name]))vehicleOverrides[name]=options[0].vehicle;return`<div class="transport-choice"><label>Транспорт: ${esc(name)}</label><select class="vehicleChoice" data-supplier="${esc(name)}">${options.map(row=>`<option value="${esc(row.vehicle)}"${row.vehicle===vehicleOverrides[name]?' selected':''}>${esc(row.vehicle)} · ${row.capacity_t} т · Москва ${Math.round(row.fixed_moscow_rub).toLocaleString('ru-RU')} ₽ · далее ${row.rate_rub_km} ₽/км</option>`).join('')}</select></div>`}).join('');transportHint.style.display=suppliers.length?'none':'block';transportChoices.querySelectorAll('.vehicleChoice').forEach(el=>el.onchange=()=>{vehicleOverrides[el.dataset.supplier]=el.value;sync();scheduleRecalculate()});sync()}
 function render(){body.innerHTML=cart.map((item,i)=>{const p=catalog.find(x=>x.id===item.id);const total=p.weight_kg*item.quantity;return`<tr><td><b>${esc(p.name)}</b><div class="muted">${esc(p.group)}</div></td><td>${esc(p.supplier)}</td><td>${esc(p.size_mm)}</td><td>${p.weight_kg} кг</td><td><input class="cartQty" data-index="${i}" type="number" min="1" step="1" value="${item.quantity}"></td><td><b class="lineWeight" data-index="${i}">${Math.round(total)} кг</b></td><td class="money">${Math.round(p.price_rub).toLocaleString('ru-RU')} ₽/шт.</td><td><button type="button" class="remove" data-index="${i}">Удалить</button></td></tr>`}).join('');empty.style.display=cart.length?'none':'block';renderTransport();document.querySelectorAll('.cartQty').forEach(el=>{el.oninput=()=>{const index=+el.dataset.index;cart[index].quantity=Math.max(1,parseInt(el.value)||1);const p=catalog.find(x=>x.id===cart[index].id),weight=document.querySelector(`.lineWeight[data-index="${index}"]`);if(weight)weight.textContent=`${Math.round(p.weight_kg*cart[index].quantity)} кг`;sync();scheduleRecalculate()};el.onblur=()=>{el.value=cart[+el.dataset.index].quantity}});document.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{cart.splice(+el.dataset.index,1);render();scheduleRecalculate()})}
 document.getElementById('addItem').onclick=()=>{if(!selectedId){alert('Выберите точное изделие из списка ниже');return}const amount=Math.max(1,parseInt(qty.value)||1);const old=cart.find(x=>x.id===selectedId);if(old)old.quantity+=amount;else cart.push({id:selectedId,quantity:amount});qty.value=1;resetSelection();render();scheduleRecalculate()};
 quoteForm.elements.address.addEventListener('change',scheduleRecalculate);quoteForm.elements.markup.addEventListener('change',scheduleRecalculate);quoteForm.onsubmit=e=>{if(!cart.length){e.preventDefault();alert('Добавьте хотя бы одно изделие в заявку');return}sync()};show();render();
@@ -371,18 +407,20 @@ def calculator():
         if not cart:
             error = "Добавьте хотя бы одно изделие в заявку."
         else:
-            lat, lon = geocode(form["address"])
+            lat, lon, is_moscow = geocode(form["address"])
             if lat is None:
                 error = "Адрес не найден. Проверьте адрес или введите координаты через запятую."
             else:
-                quote = build_quote(cart, product_by_id, delivery_rows, lat, lon, markup, vehicle_overrides)
+                quote = build_quote(
+                    cart, product_by_id, delivery_rows, lat, lon, markup, is_moscow, vehicle_overrides
+                )
                 if not quote["deliveries"]:
                     error = "Не удалось подобрать транспорт ни для одного производителя."
     catalog_for_js = [{
         key: item[key] for key in ("id", "supplier", "group", "name", "size_mm", "weight_kg", "price_rub")
     } for item in products]
     delivery_for_js = [{
-        key: item[key] for key in ("supplier", "vehicle", "capacity_t", "rate_rub_km")
+        key: item[key] for key in ("supplier", "vehicle", "capacity_t", "fixed_moscow_rub", "rate_rub_km")
     } for item in delivery_rows]
     return render_template_string(
         PAGE,
