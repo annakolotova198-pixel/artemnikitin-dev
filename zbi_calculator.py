@@ -13,6 +13,7 @@ import requests
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.section import WD_ORIENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Inches, Pt, RGBColor
@@ -417,6 +418,91 @@ def build_quote(
     }
 
 
+def build_full_load_catalog(products, delivery_options, lat, lon, markup, is_moscow=False):
+    """Calculate one completely loaded vehicle for every product and vehicle type."""
+    vehicles = []
+    sorted_products = sorted(products, key=lambda item: (item["group"], item["name"], item["size_mm"]))
+    for option in delivery_options:
+        profile = vehicle_profile(option)
+        capacity_kg = option["capacity_t"] * 1000
+        distance, distance_kind = road_distance_km(option["lat"], option["lon"], lat, lon)
+        moscow_base_distance, _ = road_distance_km(
+            option["lat"], option["lon"], MOSCOW_CENTER_LAT, MOSCOW_CENTER_LON
+        )
+        extra_km = 0 if is_moscow else max(0, distance - moscow_base_distance)
+        trip_price = option["fixed_moscow_rub"] + extra_km * option["rate_rub_km"]
+        rows = []
+        for product in sorted_products:
+            dimensions = product["dimensions"]
+            weight_kg = product["weight_kg"]
+            price_rub = product["price_rub"]
+            row = {
+                **product,
+                "load_quantity": 0,
+                "load_weight_kg": 0,
+                "purchase_goods_total": None,
+                "purchase_with_delivery_unit": None,
+                "client_unit": None,
+                "client_total": None,
+                "limiting_factor": "—",
+                "status": "Расчёт выполнен",
+            }
+            if weight_kg <= 0:
+                row["status"] = "Нет данных по массе"
+                rows.append(row)
+                continue
+            if not dimensions["estimated"] and (
+                dimensions["length_m"] > profile["length_m"]
+                or dimensions["width_m"] > profile["width_m"]
+                or dimensions["height_m"] > profile["height_m"]
+            ):
+                row["status"] = "Не помещается по габаритам"
+                rows.append(row)
+                continue
+            by_weight = math.floor(capacity_kg / weight_kg)
+            by_volume = math.floor(profile["usable_volume_m3"] / dimensions["volume_m3"])
+            load_quantity = max(0, min(by_weight, by_volume))
+            if load_quantity < 1:
+                row["status"] = "Не помещается по весу или объёму"
+                rows.append(row)
+                continue
+            row["load_quantity"] = load_quantity
+            row["load_weight_kg"] = load_quantity * weight_kg
+            row["limiting_factor"] = "масса" if by_weight <= by_volume else "габаритный объём"
+            if dimensions["estimated"] and row["limiting_factor"] == "габаритный объём":
+                row["limiting_factor"] = "оценочный объём"
+            if price_rub <= 0:
+                row["status"] = "Цена завода не указана"
+                rows.append(row)
+                continue
+            row["purchase_goods_total"] = price_rub * load_quantity
+            row["purchase_with_delivery_unit"] = price_rub + trip_price / load_quantity
+            row["client_unit"] = row["purchase_with_delivery_unit"] * (1 + markup / 100)
+            row["client_total"] = row["client_unit"] * load_quantity
+            rows.append(row)
+        vehicles.append({
+            "vehicle": option["vehicle"],
+            "capacity_t": option["capacity_t"],
+            "profile": profile,
+            "distance": distance,
+            "distance_kind": distance_kind,
+            "fixed_moscow_rub": option["fixed_moscow_rub"],
+            "rate_rub_km": option["rate_rub_km"],
+            "extra_km": extra_km,
+            "trip_price": trip_price,
+            "loading_address": option["loading_address"],
+            "rows": rows,
+            "calculated_count": sum(1 for row in rows if row["client_unit"] is not None),
+            "unavailable_count": sum(1 for row in rows if row["client_unit"] is None),
+        })
+    return {
+        "supplier": products[0]["supplier"] if products else "",
+        "products_count": len(products),
+        "vehicles": vehicles,
+        "markup": markup,
+    }
+
+
 def _set_cell_fill(cell, color):
     cell_properties = cell._tc.get_or_add_tcPr()
     shading = cell_properties.find(qn("w:shd"))
@@ -441,7 +527,7 @@ def _set_cell_margins(cell, top=80, start=120, bottom=80, end=120):
         node.set(qn("w:type"), "dxa")
 
 
-def _format_table(table, widths, header=True):
+def _format_table(table, widths, header=True, font_size=9):
     """Apply deterministic full-width geometry and restrained business styling."""
     table.autofit = False
     table.alignment = 0
@@ -483,7 +569,16 @@ def _format_table(table, widths, header=True):
                 paragraph.paragraph_format.line_spacing = 1.05
                 for run in paragraph.runs:
                     run.font.name = "Calibri"
-                    run.font.size = Pt(9)
+                    run.font.size = Pt(font_size)
+
+
+def _repeat_table_header(row):
+    row_properties = row._tr.get_or_add_trPr()
+    marker = row_properties.find(qn("w:tblHeader"))
+    if marker is None:
+        marker = OxmlElement("w:tblHeader")
+        row_properties.append(marker)
+    marker.set(qn("w:val"), "true")
 
 
 def build_proposal_document(quote, form, markup):
@@ -643,6 +738,193 @@ def build_proposal_document(quote, form, markup):
     return document
 
 
+def build_catalog_proposal_document(offer, form):
+    """Create a landscape proposal with every product and every supplier vehicle."""
+    document = Document()
+    section = document.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width = Inches(11)
+    section.page_height = Inches(8.5)
+    section.top_margin = Inches(0.48)
+    section.bottom_margin = Inches(0.48)
+    section.left_margin = Inches(0.5)
+    section.right_margin = Inches(0.5)
+    section.header_distance = Inches(0.25)
+    section.footer_distance = Inches(0.25)
+
+    normal = document.styles["Normal"]
+    normal.font.name = "Calibri"
+    normal.font.size = Pt(9)
+    normal.paragraph_format.space_after = Pt(4)
+    normal.paragraph_format.line_spacing = 1.05
+    for style_name, size in (("Heading 1", 16), ("Heading 2", 12), ("Heading 3", 10)):
+        style = document.styles[style_name]
+        style.font.name = "Calibri"
+        style.font.size = Pt(size)
+        style.font.color.rgb = RGBColor(15, 86, 132)
+        style.font.bold = True
+        style.paragraph_format.keep_with_next = True
+
+    header = document.add_table(rows=1, cols=2)
+    header.style = "Table Grid"
+    logo_cell, company_cell = header.rows[0].cells
+    logo_paragraph = logo_cell.paragraphs[0]
+    if LOGO_B64_FILE.exists():
+        logo_data = base64.b64decode(LOGO_B64_FILE.read_text(encoding="utf-8"))
+        logo_paragraph.add_run().add_picture(BytesIO(logo_data), width=Cm(2.4))
+    company_paragraph = company_cell.paragraphs[0]
+    company_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    company_run = company_paragraph.add_run(COMPANY["short_name"])
+    company_run.bold = True
+    company_run.font.size = Pt(12)
+    company_run.font.color.rgb = RGBColor(15, 86, 132)
+    contact = company_cell.add_paragraph(f'{COMPANY["phone"]} · {COMPANY["email"]}')
+    contact.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    _format_table(header, [2.0, 7.9], header=False, font_size=8.5)
+
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title.paragraph_format.space_before = Pt(8)
+    title.paragraph_format.space_after = Pt(1)
+    title_run = title.add_run("КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ")
+    title_run.bold = True
+    title_run.font.size = Pt(18)
+    title_run.font.color.rgb = RGBColor(15, 86, 132)
+    subtitle = document.add_paragraph(
+        f'Полный каталог поставок {offer["supplier"]}: варианты полной загрузки машин'
+    )
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle.paragraph_format.space_after = Pt(7)
+    subtitle.runs[0].font.size = Pt(10)
+    subtitle.runs[0].font.color.rgb = RGBColor(92, 103, 117)
+
+    metadata = document.add_table(rows=0, cols=4)
+    metadata.style = "Table Grid"
+    metadata_rows = [
+        ("Компания клиента", form.get("client_company") or "—", "ИНН", form.get("client_inn") or "—"),
+        ("Контактное лицо", form.get("client_contact_name") or "—", "Контакт", form.get("client_contact") or "—"),
+        ("Адрес доставки", form.get("address") or "—", "Дата", date.today().strftime("%d.%m.%Y")),
+        ("Производитель", offer["supplier"], "Наценка менеджера", f'{offer["markup"]:g}%'),
+    ]
+    for left_label, left_value, right_label, right_value in metadata_rows:
+        cells = metadata.add_row().cells
+        for cell, value in zip(cells, (left_label, left_value, right_label, right_value)):
+            cell.text = str(value)
+        for index in (0, 2):
+            cells[index].paragraphs[0].runs[0].bold = True
+            _set_cell_fill(cells[index], "F1F5F9")
+    _format_table(metadata, [1.2, 4.05, 1.2, 3.45], header=False, font_size=8)
+
+    intro = document.add_paragraph(
+        "В таблицах ниже каждая строка — отдельный вариант поставки одной полной машиной. "
+        "Цена клиента включает стоимость изделий, доставку до указанного адреса и наценку менеджера."
+    )
+    intro.paragraph_format.space_before = Pt(6)
+    intro.paragraph_format.space_after = Pt(4)
+
+    for vehicle_index, vehicle in enumerate(offer["vehicles"]):
+        if vehicle_index:
+            document.add_page_break()
+        heading = document.add_paragraph(
+            f'{vehicle["vehicle"]} · грузоподъёмность {vehicle["capacity_t"]:g} т',
+            style="Heading 2",
+        )
+        heading.paragraph_format.space_after = Pt(2)
+        tariff = document.add_paragraph(
+            f'Доставка одной машины: {vehicle["trip_price"]:,.0f} ₽ · '
+            f'расстояние {vehicle["distance"]:.1f} км ({vehicle["distance_kind"]}) · '
+            f'рассчитано {vehicle["calculated_count"]} из {offer["products_count"]} позиций. '
+            f'Погрузка: {vehicle["loading_address"]}'.replace(",", " ")
+        )
+        tariff.paragraph_format.space_after = Pt(4)
+        tariff.runs[0].font.size = Pt(8.5)
+
+        table = document.add_table(rows=1, cols=8)
+        table.style = "Table Grid"
+        headers = [
+            "№", "Изделие / раздел", "Габариты / масса", "Полная загрузка",
+            "Цена завода", "Доставка / рейс", "Клиенту за 1 ед.", "Полная машина / статус",
+        ]
+        for cell, value in zip(table.rows[0].cells, headers):
+            cell.text = value
+        _repeat_table_header(table.rows[0])
+        for number, row in enumerate(vehicle["rows"], 1):
+            cells = table.add_row().cells
+            dimensions = row["dimensions"]
+            dimension_note = f'{row["size_mm"]}; {row["weight_kg"]:g} кг'
+            if dimensions["estimated"]:
+                dimension_note += " (объём оценочный)"
+            if row["client_unit"] is not None:
+                final_value = (
+                    f'{row["client_total"]:,.0f} ₽\n'
+                    f'Загрузка: {row["load_weight_kg"] / 1000:.2f} т; лимит: {row["limiting_factor"]}'
+                )
+                values = [
+                    number,
+                    f'{row["name"]}\n{row["group"]}',
+                    dimension_note,
+                    f'{row["load_quantity"]} шт.',
+                    f'{row["price_rub"]:,.0f} ₽/шт.',
+                    f'{vehicle["trip_price"]:,.0f} ₽',
+                    f'{row["client_unit"]:,.0f} ₽',
+                    final_value,
+                ]
+            else:
+                values = [
+                    number, f'{row["name"]}\n{row["group"]}', dimension_note, "—",
+                    f'{row["price_rub"]:,.0f} ₽/шт.' if row["price_rub"] > 0 else "—",
+                    f'{vehicle["trip_price"]:,.0f} ₽', "—", row["status"],
+                ]
+            for cell, value in zip(cells, values):
+                cell.text = str(value).replace(",", " ")
+        _format_table(table, [0.32, 2.35, 1.22, 0.78, 0.9, 0.92, 1.1, 2.31], font_size=7.2)
+
+    document.add_paragraph("Условия предложения", style="Heading 2")
+    document.add_paragraph(
+        "Расчёт носит коммерческий характер. Фактическую схему укладки, допустимую загрузку по осям, "
+        "наличие изделий и сроки отгрузки необходимо подтвердить у производителя перед заказом. "
+        "Для позиций с оценочным объёмом требуется дополнительная проверка габаритов."
+    )
+    document.add_paragraph("Реквизиты поставщика", style="Heading 2")
+    requisites = document.add_table(rows=0, cols=4)
+    requisites.style = "Table Grid"
+    for values in (
+        ("Поставщик", COMPANY["full_name"], "ИНН / КПП", f'{COMPANY["inn"]} / {COMPANY["kpp"]}'),
+        ("ОГРН", COMPANY["ogrn"], "Банк", COMPANY["bank"]),
+        ("Р/с", COMPANY["account"], "БИК", COMPANY["bik"]),
+        ("Генеральный директор", COMPANY["director"], "Юридический адрес", COMPANY["address"]),
+    ):
+        cells = requisites.add_row().cells
+        for cell, value in zip(cells, values):
+            cell.text = str(value)
+        for index in (0, 2):
+            cells[index].paragraphs[0].runs[0].bold = True
+    _format_table(requisites, [1.3, 3.65, 1.3, 3.65], header=False, font_size=7.5)
+
+    footer = section.footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer_run = footer.add_run(f'{COMPANY["short_name"]} · {COMPANY["phone"]} · {COMPANY["email"]}')
+    footer_run.font.size = Pt(7.5)
+    footer_run.font.color.rgb = RGBColor(100, 110, 122)
+    return document
+
+
+CATALOG_PAGE = r"""
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>КП полного каталога ЖБИ</title><style>
+:root{--ink:#18202a;--muted:#647184;--blue:#185bd8;--line:#dce3ec;--bg:#f3f6fa;--ok:#e9f8ef;--warn:#fff6df}
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1180px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}h1,h2,h3{margin-top:0}.muted{color:var(--muted);font-size:13px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:var(--warn);border:1px solid #f0d58a}.vehicle{border:1px solid var(--line);border-radius:12px;padding:15px;margin-top:12px}.badges{display:flex;gap:8px;flex-wrap:wrap}.badge{background:#eef3ff;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:700}.actions{display:flex;gap:12px;justify-content:flex-end;margin-top:18px}.actions button{max-width:420px}@media(max-width:800px){body{padding:12px}.grid{grid-template-columns:1fr}.span2{grid-column:span 1}.actions{display:block}.actions button{max-width:none;margin-top:10px}}
+</style></head><body><div class="wrap">
+<div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/zbi/catalog-proposal">КП полного каталога</a><a href="/carriers">Перевозчики</a></div>
+<form method="post"><div class="card"><h1>КП по полной загрузке каталога производителя</h1><p class="muted">Выберите одного производителя. Система рассчитает поставку каждого его изделия отдельной полной машиной для всех доступных видов транспорта и подготовит единый Word‑документ.</p>
+<div class="grid"><div class="span2"><label>Производитель</label><select name="supplier" required><option value="">Выберите производителя</option>{% for item in suppliers %}<option value="{{ item }}"{% if form.supplier == item %} selected{% endif %}>{{ item }}</option>{% endfor %}</select></div><div class="span2"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required></div><div><label>Наценка менеджера, %</label><input name="markup" type="number" min="0" step="0.1" value="{{ form.markup }}" required></div><div><label>Компания клиента</label><input name="client_company" value="{{ form.client_company }}"></div><div><label>ИНН клиента</label><input name="client_inn" value="{{ form.client_inn }}"></div><div><label>ФИО контактного лица</label><input name="client_contact_name" value="{{ form.client_contact_name }}"></div><div class="span2"><label>Телефон или e-mail</label><input name="client_contact" value="{{ form.client_contact }}"></div></div>
+<div class="actions"><button type="submit">Рассчитать полный каталог</button>{% if offer %}<button type="submit" class="secondary" formaction="/zbi/catalog-proposal.docx" formmethod="post">Скачать КП в Word</button>{% endif %}</div></div></form>
+{% if error %}<div class="card warning"><b>Расчёт не выполнен.</b> {{ error }}</div>{% endif %}
+{% if offer %}<div class="card summary"><h2>{{ offer.supplier }}</h2><p><b>{{ offer.products_count }} изделий</b> · наценка {{ offer.markup }}% · рассчитано для {{ offer.vehicles|length }} видов транспорта.</p>{% for vehicle in offer.vehicles %}<div class="vehicle"><h3>{{ vehicle.vehicle }} · {{ vehicle.capacity_t|round(0)|int }} т</h3><div class="badges"><span class="badge">рейс {{ vehicle.trip_price|money }} ₽</span><span class="badge">{{ vehicle.distance|round(1) }} км</span><span class="badge">рассчитано {{ vehicle.calculated_count }}</span><span class="badge">нужна проверка {{ vehicle.unavailable_count }}</span></div><p class="muted">В Word‑документ войдут все {{ offer.products_count }} позиций, включая строки с отсутствующими данными или превышением габаритов.</p></div>{% endfor %}</div>{% endif %}
+</div></body></html>
+"""
+
+
 PAGE = r"""
 <!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Калькулятор заявки ЖБИ</title>
@@ -651,7 +933,7 @@ PAGE = r"""
 *{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1380px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}.span4{grid-column:span 4}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.remove{background:#fff;color:var(--danger);border-color:#e6bcbc;padding:7px;min-height:34px}.hint,.muted{color:var(--muted);font-size:13px}.suggestions{max-height:360px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px}.suggestion{display:block;width:100%;min-height:0;padding:10px 12px;background:#fff;color:var(--ink);text-align:left;border:0;border-bottom:1px solid #edf0f4;border-radius:0;cursor:pointer}.suggestion:hover,.suggestion.selected{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px;font-weight:400}.list-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:7px}.transport-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.transport-choice{padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8faff}.calculate-footer{display:flex;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin-top:20px;padding-top:18px;border-top:1px solid var(--line)}.calculate-footer button{max-width:420px}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:#fff6df;border:1px solid #f0d58a}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{background:#f5f8fc;border-radius:12px;padding:14px}.kpi b{display:block;font-size:22px;margin-top:4px}.delivery{border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:12px}.badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1;vertical-align:top}th{font-size:12px;color:var(--muted)}.money{font-weight:800;white-space:nowrap}.empty{text-align:center;color:var(--muted);padding:24px}.actions{display:flex;gap:10px;align-items:end}.actions>*{flex:1}
 @media(max-width:900px){body{padding:12px}.grid{grid-template-columns:1fr}.span2,.span4{grid-column:span 1}.kpis{grid-template-columns:1fr 1fr}.actions{display:block}.actions>*{margin-top:8px}}
 </style></head><body><div class="wrap">
-<div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/carriers">Перевозчики</a></div>
+<div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/zbi/catalog-proposal">КП полного каталога</a><a href="/carriers">Перевозчики</a></div>
 <form method="post" id="quoteForm"><input type="hidden" name="items_json" id="itemsJson"><input type="hidden" name="vehicles_json" id="vehiclesJson"><input type="hidden" name="loads_json" id="loadsJson">
 <div class="card"><h1>Расчёт и формирование заявки ЖБИ</h1><p class="muted">Добавьте изделия, укажите адрес и наценку. Для каждой позиции будет рассчитана закупочная цена с доставкой и цена клиенту.</p>
 <div class="grid"><div class="span2"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required></div><div class="span2"><label>Наценка на полную стоимость, %</label><input type="number" min="0" step="0.1" name="markup" value="{{ form.markup }}" required></div></div>
@@ -747,6 +1029,84 @@ def calculator():
         delivery_json=json.dumps(delivery_for_js, ensure_ascii=False).replace("</", "<\\/"),
         vehicle_overrides_json=json.dumps(vehicle_overrides, ensure_ascii=False).replace("</", "<\\/"),
         manual_loads_json=json.dumps(manual_loads, ensure_ascii=False).replace("</", "<\\/"),
+    )
+
+
+def _catalog_proposal_input():
+    products, delivery_rows = load_catalog()
+    suppliers_with_delivery = {item["supplier"] for item in delivery_rows}
+    suppliers = sorted({item["supplier"] for item in products} & suppliers_with_delivery)
+    form = {
+        "supplier": request.form.get("supplier", "").strip(),
+        "address": request.form.get("address", "").strip(),
+        "markup": request.form.get("markup", "10"),
+        "client_company": request.form.get("client_company", "").strip(),
+        "client_inn": request.form.get("client_inn", "").strip(),
+        "client_contact_name": request.form.get("client_contact_name", "").strip(),
+        "client_contact": request.form.get("client_contact", "").strip(),
+    }
+    markup = max(0, _float(form["markup"], 0))
+    if form["supplier"] not in suppliers:
+        return suppliers, form, markup, None, "Выберите производителя из списка."
+    lat, lon, is_moscow = geocode(form["address"])
+    if lat is None:
+        return suppliers, form, markup, None, "Адрес не найден. Проверьте улицу и номер дома."
+    supplier_products = [item for item in products if item["supplier"] == form["supplier"]]
+    supplier_delivery = [item for item in delivery_rows if item["supplier"] == form["supplier"]]
+    offer = build_full_load_catalog(
+        supplier_products, supplier_delivery, lat, lon, markup, is_moscow
+    )
+    if not offer["vehicles"]:
+        return suppliers, form, markup, None, "Для производителя не найдены тарифы транспорта."
+    return suppliers, form, markup, offer, ""
+
+
+@zbi_bp.route("/catalog-proposal", methods=["GET", "POST"])
+def catalog_proposal():
+    products, delivery_rows = load_catalog()
+    suppliers = sorted(
+        {item["supplier"] for item in products}
+        & {item["supplier"] for item in delivery_rows}
+    )
+    form = {
+        "supplier": request.form.get("supplier", "").strip(),
+        "address": request.form.get("address", "").strip(),
+        "markup": request.form.get("markup", "10"),
+        "client_company": request.form.get("client_company", "").strip(),
+        "client_inn": request.form.get("client_inn", "").strip(),
+        "client_contact_name": request.form.get("client_contact_name", "").strip(),
+        "client_contact": request.form.get("client_contact", "").strip(),
+    }
+    offer = None
+    error = ""
+    markup = max(0, _float(form["markup"], 0))
+    if request.method == "POST":
+        suppliers, form, markup, offer, error = _catalog_proposal_input()
+    return render_template_string(
+        CATALOG_PAGE,
+        suppliers=suppliers,
+        form=form,
+        markup=markup,
+        offer=offer,
+        error=error,
+    )
+
+
+@zbi_bp.route("/catalog-proposal.docx", methods=["POST"])
+def catalog_proposal_docx():
+    _, form, _, offer, error = _catalog_proposal_input()
+    if error:
+        return error, 400
+    document = build_catalog_proposal_document(offer, form)
+    output = BytesIO()
+    document.save(output)
+    output.seek(0)
+    safe_supplier = re.sub(r"[^0-9A-Za-zА-Яа-я_-]+", "_", offer["supplier"]).strip("_")
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"КП_полный_каталог_{safe_supplier}_{date.today().isoformat()}.docx",
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
 
