@@ -703,9 +703,9 @@ def build_proposal_document(quote, form):
     heading = document.add_paragraph("Состав предложения", style="Heading 2")
     heading.paragraph_format.space_before = Pt(12)
     heading.paragraph_format.space_after = Pt(5)
-    products_table = document.add_table(rows=1, cols=6)
+    products_table = document.add_table(rows=1, cols=5)
     products_table.style = "Table Grid"
-    headers = ["№", "Наименование", "Производитель", "Кол-во", "Цена за ед. с доставкой", "Сумма"]
+    headers = ["№", "Наименование", "Кол-во", "Цена за ед. с доставкой", "Сумма"]
     for cell, value in zip(products_table.rows[0].cells, headers):
         cell.text = value
     for number, line in enumerate(quote["lines"], 1):
@@ -713,32 +713,31 @@ def build_proposal_document(quote, form):
         values = [
             number,
             f'{line["name"]}\n{line["size_mm"]}; {line["weight_kg"]:g} кг/шт.',
-            line["supplier"],
             f'{line["quantity"]} шт.',
             f'{line["client_unit"]:,.0f} ₽'.replace(",", " "),
             f'{line["client_line_total"]:,.0f} ₽'.replace(",", " "),
         ]
         for cell, value in zip(cells, values):
             cell.text = str(value)
-    _format_table(products_table, [0.35, 2.05, 1.25, 0.6, 1.35, 1.45])
+    _format_table(products_table, [0.35, 2.8, 0.7, 1.45, 1.75])
 
     delivery_heading = document.add_paragraph("Доставка", style="Heading 2")
     delivery_heading.paragraph_format.space_before = Pt(10)
     delivery_heading.paragraph_format.space_after = Pt(5)
-    delivery_table = document.add_table(rows=1, cols=5)
+    delivery_table = document.add_table(rows=1, cols=4)
     delivery_table.style = "Table Grid"
-    for cell, value in zip(delivery_table.rows[0].cells, ["Производитель", "Транспорт", "Рейсы", "Загрузка на рейс", "Стоимость"]):
+    for cell, value in zip(delivery_table.rows[0].cells, ["Транспорт", "Рейсы", "Загрузка на рейс", "Стоимость"]):
         cell.text = value
     for item in quote["deliveries"]:
         cells = delivery_table.add_row().cells
         loading = "; ".join(f'{line["name"]}: {line["quantity_per_trip"]}' for line in item["lines"])
         values = [
-            item["supplier"], item["vehicle"], item["trips"], loading,
+            item["vehicle"], item["trips"], loading,
             f'{item["delivery_total"]:,.0f} ₽'.replace(",", " "),
         ]
         for cell, value in zip(cells, values):
             cell.text = str(value)
-    _format_table(delivery_table, [1.25, 1.1, 0.55, 2.7, 1.45])
+    _format_table(delivery_table, [1.3, 0.7, 3.5, 1.55])
 
     total = document.add_paragraph()
     total.alignment = WD_ALIGN_PARAGRAPH.RIGHT
