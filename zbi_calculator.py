@@ -329,6 +329,27 @@ def parse_delivery_price_overrides(raw_value, delivery_rows):
     return result
 
 
+def parse_catalog_delivery_prices(raw_value, supplier, delivery_rows):
+    try:
+        raw = json.loads(raw_value or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        return {}
+    allowed_vehicles = {
+        row["vehicle"] for row in delivery_rows if row["supplier"] == supplier
+    }
+    result = {}
+    for vehicle, value in raw.items():
+        vehicle = str(vehicle)
+        if vehicle not in allowed_vehicles or value in (None, ""):
+            continue
+        price = _float(value, -1)
+        if price >= 0:
+            result[vehicle] = price
+    return result
+
+
 def build_quote(
     cart,
     product_by_id,
@@ -445,8 +466,12 @@ def build_quote(
     }
 
 
-def build_full_load_catalog(products, delivery_options, lat, lon, markup, is_moscow=False):
+def build_full_load_catalog(
+    products, delivery_options, lat, lon, markup, is_moscow=False,
+    delivery_price_overrides=None,
+):
     """Calculate one completely loaded vehicle for every product and vehicle type."""
+    delivery_price_overrides = delivery_price_overrides or {}
     vehicles = []
     sorted_products = sorted(products, key=lambda item: (item["group"], item["name"], item["size_mm"]))
     for option in delivery_options:
@@ -457,7 +482,9 @@ def build_full_load_catalog(products, delivery_options, lat, lon, markup, is_mos
             option["lat"], option["lon"], MOSCOW_CENTER_LAT, MOSCOW_CENTER_LON
         )
         extra_km = 0 if is_moscow else max(0, distance - moscow_base_distance)
-        trip_price = option["fixed_moscow_rub"] + extra_km * option["rate_rub_km"]
+        automatic_trip_price = option["fixed_moscow_rub"] + extra_km * option["rate_rub_km"]
+        manual_trip_price = delivery_price_overrides.get(option["vehicle"])
+        trip_price = automatic_trip_price if manual_trip_price is None else manual_trip_price
         rows = []
         for product in sorted_products:
             dimensions = product["dimensions"]
@@ -517,6 +544,8 @@ def build_full_load_catalog(products, delivery_options, lat, lon, markup, is_mos
             "rate_rub_km": option["rate_rub_km"],
             "extra_km": extra_km,
             "trip_price": trip_price,
+            "automatic_trip_price": automatic_trip_price,
+            "manual_delivery_price": manual_trip_price is not None,
             "loading_address": option["loading_address"],
             "rows": rows,
             "calculated_count": sum(1 for row in rows if row["client_unit"] is not None),
@@ -957,15 +986,21 @@ CATALOG_PAGE = r"""
 <!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>КП полного каталога ЖБИ</title><style>
 :root{--ink:#18202a;--muted:#647184;--blue:#185bd8;--line:#dce3ec;--bg:#f3f6fa;--ok:#e9f8ef;--warn:#fff6df}
-*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1180px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}h1,h2,h3{margin-top:0}.muted{color:var(--muted);font-size:13px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:var(--warn);border:1px solid #f0d58a}.vehicle{border:1px solid var(--line);border-radius:12px;padding:15px;margin-top:12px}.badges{display:flex;gap:8px;flex-wrap:wrap}.badge{background:#eef3ff;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:700}.actions{display:flex;gap:12px;justify-content:flex-end;margin-top:18px}.actions button{max-width:420px}@media(max-width:800px){body{padding:12px}.grid{grid-template-columns:1fr}.span2{grid-column:span 1}.actions{display:block}.actions button{max-width:none;margin-top:10px}}
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1180px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}h1,h2,h3{margin-top:0}.muted{color:var(--muted);font-size:13px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}.span4{grid-column:span 4}.price-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.price-card{padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8faff}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:var(--warn);border:1px solid #f0d58a}.vehicle{border:1px solid var(--line);border-radius:12px;padding:15px;margin-top:12px}.badges{display:flex;gap:8px;flex-wrap:wrap}.badge{background:#eef3ff;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:700}.actions{display:flex;gap:12px;justify-content:flex-end;margin-top:18px}.actions button{max-width:420px}@media(max-width:800px){body{padding:12px}.grid,.price-grid{grid-template-columns:1fr}.span2,.span4{grid-column:span 1}.actions{display:block}.actions button{max-width:none;margin-top:10px}}
 </style></head><body><div class="wrap">
 <div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/zbi/catalog-proposal">КП полного каталога</a><a href="/carriers">Перевозчики</a></div>
-<form method="post"><div class="card"><h1>КП по полной загрузке каталога производителя</h1><p class="muted">Выберите одного производителя, адрес и наценку. По одной кнопке сразу сформируется Word‑КП со всеми товарами: каждый товар будет рассчитан как отдельная полная загрузка всех доступных машин производителя.</p>
-<div class="grid"><div class="span2"><label>Производитель</label><select name="supplier" required><option value="">Выберите производителя</option>{% for item in suppliers %}<option value="{{ item }}"{% if form.supplier == item %} selected{% endif %}>{{ item }}</option>{% endfor %}</select></div><div class="span2"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required></div><div><label>Наценка менеджера, %</label><input name="markup" type="number" min="0" step="0.1" value="{{ form.markup }}" required></div><div><label>Компания клиента</label><input name="client_company" value="{{ form.client_company }}"></div><div><label>ИНН клиента</label><input name="client_inn" value="{{ form.client_inn }}"></div><div><label>ФИО контактного лица</label><input name="client_contact_name" value="{{ form.client_contact_name }}"></div><div class="span2"><label>Телефон или e-mail</label><input name="client_contact" value="{{ form.client_contact }}"></div></div>
+<form method="post"><input type="hidden" name="catalog_delivery_prices_json" id="catalogDeliveryPricesJson"><div class="card"><h1>КП по полной загрузке каталога производителя</h1><p class="muted">Выберите одного производителя, адрес и наценку. По одной кнопке сразу сформируется Word‑КП со всеми товарами: каждый товар будет рассчитан как отдельная полная загрузка всех доступных машин производителя.</p>
+<div class="grid"><div class="span2"><label>Производитель</label><select name="supplier" id="catalogSupplier" required><option value="">Выберите производителя</option>{% for item in suppliers %}<option value="{{ item }}"{% if form.supplier == item %} selected{% endif %}>{{ item }}</option>{% endfor %}</select></div><div class="span2"><label>Адрес доставки</label><input name="address" value="{{ form.address }}" placeholder="Москва, улица и дом" required></div><div><label>Наценка менеджера, %</label><input name="markup" type="number" min="0" step="0.1" value="{{ form.markup }}" required></div><div><label>Компания клиента</label><input name="client_company" value="{{ form.client_company }}"></div><div><label>ИНН клиента</label><input name="client_inn" value="{{ form.client_inn }}"></div><div><label>ФИО контактного лица</label><input name="client_contact_name" value="{{ form.client_contact_name }}"></div><div class="span2"><label>Телефон или e-mail</label><input name="client_contact" value="{{ form.client_contact }}"></div><div class="span4"><label>Стоимость доставки за один рейс</label><div id="catalogDeliveryPrices" class="price-grid"><div class="muted">Сначала выберите производителя</div></div></div></div>
 <div class="actions"><button type="submit" class="secondary">Предварительный расчёт</button><button type="submit" formaction="/zbi/catalog-proposal.docx" formmethod="post">Сформировать и скачать КП</button></div></div></form>
 {% if error %}<div class="card warning"><b>Расчёт не выполнен.</b> {{ error }}</div>{% endif %}
-{% if offer %}<div class="card summary"><h2>{{ offer.supplier }}</h2><p><b>{{ offer.products_count }} изделий</b> · наценка {{ offer.markup }}% · рассчитано для {{ offer.vehicles|length }} видов транспорта.</p>{% for vehicle in offer.vehicles %}<div class="vehicle"><h3>{{ vehicle.vehicle }} · {{ vehicle.capacity_t|round(0)|int }} т</h3><div class="badges"><span class="badge">рейс {{ vehicle.trip_price|money }} ₽</span><span class="badge">{{ vehicle.distance|round(1) }} км</span><span class="badge">рассчитано {{ vehicle.calculated_count }}</span><span class="badge">нужна проверка {{ vehicle.unavailable_count }}</span></div><p class="muted">В Word‑документ войдут все {{ offer.products_count }} позиций, включая строки с отсутствующими данными или превышением габаритов.</p></div>{% endfor %}</div>{% endif %}
-</div></body></html>
+{% if offer %}<div class="card summary"><h2>{{ offer.supplier }}</h2><p><b>{{ offer.products_count }} изделий</b> · наценка {{ offer.markup }}% · рассчитано для {{ offer.vehicles|length }} видов транспорта.</p>{% for vehicle in offer.vehicles %}<div class="vehicle"><h3>{{ vehicle.vehicle }} · {{ vehicle.capacity_t|round(0)|int }} т</h3><div class="badges"><span class="badge">рейс {{ vehicle.trip_price|money }} ₽{% if vehicle.manual_delivery_price %} · ручная цена{% endif %}</span><span class="badge">{{ vehicle.distance|round(1) }} км</span><span class="badge">рассчитано {{ vehicle.calculated_count }}</span><span class="badge">нужна проверка {{ vehicle.unavailable_count }}</span></div><p class="muted">В Word‑документ войдут все {{ offer.products_count }} позиций, включая строки с отсутствующими данными или превышением габаритов.</p></div>{% endfor %}</div>{% endif %}
+</div><script>
+const catalogDelivery={{ catalog_delivery_json|safe }},catalogDeliveryPrices={{ catalog_delivery_prices_json|safe }};
+const catalogSupplier=document.getElementById('catalogSupplier'),catalogDeliveryBox=document.getElementById('catalogDeliveryPrices'),catalogDeliveryHidden=document.getElementById('catalogDeliveryPricesJson');
+const catalogEsc=s=>String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+function renderCatalogDeliveryPrices(){const rows=catalogDelivery.filter(row=>row.supplier===catalogSupplier.value);catalogDeliveryBox.innerHTML=rows.length?rows.map(row=>`<div class="price-card"><label>${catalogEsc(row.vehicle)} · ${row.capacity_t} т</label><input class="catalogDeliveryPrice" data-vehicle="${catalogEsc(row.vehicle)}" type="number" min="0" step="100" value="${Object.prototype.hasOwnProperty.call(catalogDeliveryPrices,row.vehicle)?catalogDeliveryPrices[row.vehicle]:''}" placeholder="Пусто = авто ${Math.round(row.fixed_moscow_rub).toLocaleString('ru-RU')} ₽"><div class="muted" style="margin-top:5px">Можно указать свою стоимость рейса для этой машины.</div></div>`).join(''):'<div class="muted">Сначала выберите производителя</div>';catalogDeliveryBox.querySelectorAll('.catalogDeliveryPrice').forEach(el=>el.oninput=()=>{if(el.value==='')delete catalogDeliveryPrices[el.dataset.vehicle];else catalogDeliveryPrices[el.dataset.vehicle]=Math.max(0,Number(el.value)||0);catalogDeliveryHidden.value=JSON.stringify(catalogDeliveryPrices)});catalogDeliveryHidden.value=JSON.stringify(catalogDeliveryPrices)}
+catalogSupplier.addEventListener('change',()=>{Object.keys(catalogDeliveryPrices).forEach(key=>delete catalogDeliveryPrices[key]);renderCatalogDeliveryPrices()});renderCatalogDeliveryPrices();
+</script></body></html>
 """
 
 
@@ -1094,6 +1129,7 @@ def _catalog_proposal_input():
         "client_inn": request.form.get("client_inn", "").strip(),
         "client_contact_name": request.form.get("client_contact_name", "").strip(),
         "client_contact": request.form.get("client_contact", "").strip(),
+        "catalog_delivery_prices_json": request.form.get("catalog_delivery_prices_json", "{}"),
     }
     markup = max(0, _float(form["markup"], 0))
     if form["supplier"] not in suppliers:
@@ -1103,8 +1139,12 @@ def _catalog_proposal_input():
         return suppliers, form, markup, None, "Адрес не найден. Проверьте улицу и номер дома."
     supplier_products = [item for item in products if item["supplier"] == form["supplier"]]
     supplier_delivery = [item for item in delivery_rows if item["supplier"] == form["supplier"]]
+    delivery_price_overrides = parse_catalog_delivery_prices(
+        form["catalog_delivery_prices_json"], form["supplier"], delivery_rows
+    )
     offer = build_full_load_catalog(
-        supplier_products, supplier_delivery, lat, lon, markup, is_moscow
+        supplier_products, supplier_delivery, lat, lon, markup, is_moscow,
+        delivery_price_overrides,
     )
     if not offer["vehicles"]:
         return suppliers, form, markup, None, "Для производителя не найдены тарифы транспорта."
@@ -1126,6 +1166,7 @@ def catalog_proposal():
         "client_inn": request.form.get("client_inn", "").strip(),
         "client_contact_name": request.form.get("client_contact_name", "").strip(),
         "client_contact": request.form.get("client_contact", "").strip(),
+        "catalog_delivery_prices_json": request.form.get("catalog_delivery_prices_json", "{}"),
     }
     offer = None
     error = ""
@@ -1139,6 +1180,19 @@ def catalog_proposal():
         markup=markup,
         offer=offer,
         error=error,
+        catalog_delivery_json=json.dumps([
+            {
+                key: row[key]
+                for key in ("supplier", "vehicle", "capacity_t", "fixed_moscow_rub")
+            }
+            for row in delivery_rows
+        ], ensure_ascii=False).replace("</", "<\\/"),
+        catalog_delivery_prices_json=json.dumps(
+            parse_catalog_delivery_prices(
+                form["catalog_delivery_prices_json"], form["supplier"], delivery_rows
+            ),
+            ensure_ascii=False,
+        ).replace("</", "<\\/"),
     )
 
 
