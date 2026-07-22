@@ -624,7 +624,7 @@ def _set_table_borders(table, value="nil", color="FFFFFF", size="0"):
         tag.set(qn("w:sz"), size)
 
 
-def build_proposal_document(quote, form, markup):
+def build_proposal_document(quote, form):
     """Create a branded commercial proposal showing only client-facing prices."""
     document = Document()
     section = document.sections[0]
@@ -748,7 +748,7 @@ def build_proposal_document(quote, form, markup):
     total_run.font.size = Pt(15)
     total_run.font.color.rgb = RGBColor(15, 86, 132)
     note = document.add_paragraph(
-        f'Цена включает доставку до указанного объекта и наценку {markup:g}%. '
+        'Все указанные цены являются конечными и включают доставку до указанного объекта. '
         "Окончательные сроки поставки и график рейсов согласовываются при подтверждении заказа."
     )
     note.paragraph_format.space_after = Pt(10)
@@ -1193,7 +1193,7 @@ def proposal_docx():
     )
     if not quote["deliveries"]:
         return "Не удалось подобрать транспорт для коммерческого предложения.", 400
-    document = build_proposal_document(quote, form, markup)
+    document = build_proposal_document(quote, form)
     output = BytesIO()
     document.save(output)
     output.seek(0)
