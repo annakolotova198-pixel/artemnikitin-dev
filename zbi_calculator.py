@@ -581,6 +581,22 @@ def _repeat_table_header(row):
     marker.set(qn("w:val"), "true")
 
 
+def _set_table_borders(table, value="nil", color="FFFFFF", size="0"):
+    properties = table._tbl.tblPr
+    borders = properties.find(qn("w:tblBorders"))
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        properties.append(borders)
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        tag = borders.find(qn(f"w:{edge}"))
+        if tag is None:
+            tag = OxmlElement(f"w:{edge}")
+            borders.append(tag)
+        tag.set(qn("w:val"), value)
+        tag.set(qn("w:color"), color)
+        tag.set(qn("w:sz"), size)
+
+
 def build_proposal_document(quote, form, markup):
     """Create a branded commercial proposal showing only client-facing prices."""
     document = Document()
@@ -755,56 +771,71 @@ def build_catalog_proposal_document(offer, form):
     normal = document.styles["Normal"]
     normal.font.name = "Calibri"
     normal.font.size = Pt(9)
-    normal.paragraph_format.space_after = Pt(4)
-    normal.paragraph_format.line_spacing = 1.05
-    for style_name, size in (("Heading 1", 16), ("Heading 2", 12), ("Heading 3", 10)):
+    normal.paragraph_format.space_after = Pt(6)
+    normal.paragraph_format.line_spacing = 1.25
+    for style_name, size, before, after in (
+        ("Heading 1", 16, 18, 10),
+        ("Heading 2", 13, 14, 7),
+        ("Heading 3", 12, 10, 5),
+    ):
         style = document.styles[style_name]
         style.font.name = "Calibri"
         style.font.size = Pt(size)
         style.font.color.rgb = RGBColor(15, 86, 132)
         style.font.bold = True
+        style.paragraph_format.space_before = Pt(before)
+        style.paragraph_format.space_after = Pt(after)
         style.paragraph_format.keep_with_next = True
 
     header = document.add_table(rows=1, cols=2)
-    header.style = "Table Grid"
+    header.autofit = False
     logo_cell, company_cell = header.rows[0].cells
     logo_paragraph = logo_cell.paragraphs[0]
+    logo_paragraph.paragraph_format.space_after = Pt(0)
     if LOGO_B64_FILE.exists():
         logo_data = base64.b64decode(LOGO_B64_FILE.read_text(encoding="utf-8"))
-        logo_paragraph.add_run().add_picture(BytesIO(logo_data), width=Cm(2.4))
+        logo_paragraph.add_run().add_picture(BytesIO(logo_data), width=Cm(2.2))
     company_paragraph = company_cell.paragraphs[0]
     company_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     company_run = company_paragraph.add_run(COMPANY["short_name"])
     company_run.bold = True
-    company_run.font.size = Pt(12)
+    company_run.font.size = Pt(14)
     company_run.font.color.rgb = RGBColor(15, 86, 132)
-    contact = company_cell.add_paragraph(f'{COMPANY["phone"]} · {COMPANY["email"]}')
+    contact = company_cell.add_paragraph(
+        f'{COMPANY["phone"]}  |  {COMPANY["email"]}\nИНН {COMPANY["inn"]}'
+    )
     contact.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    _format_table(header, [2.0, 7.9], header=False, font_size=8.5)
+    contact.paragraph_format.space_after = Pt(0)
+    _format_table(header, [2.0, 7.9], header=False, font_size=9)
+    _set_table_borders(header)
 
+    kicker = document.add_paragraph("ПОСТАВКА ЖЕЛЕЗОБЕТОННЫХ ИЗДЕЛИЙ")
+    kicker.paragraph_format.space_before = Pt(10)
+    kicker.paragraph_format.space_after = Pt(2)
+    kicker_run = kicker.runs[0]
+    kicker_run.bold = True
+    kicker_run.font.size = Pt(9)
+    kicker_run.font.color.rgb = RGBColor(218, 139, 18)
     title = document.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title.paragraph_format.space_before = Pt(8)
-    title.paragraph_format.space_after = Pt(1)
+    title.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    title.paragraph_format.space_before = Pt(0)
+    title.paragraph_format.space_after = Pt(3)
     title_run = title.add_run("КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ")
     title_run.bold = True
-    title_run.font.size = Pt(18)
-    title_run.font.color.rgb = RGBColor(15, 86, 132)
-    subtitle = document.add_paragraph(
-        f'Полный каталог поставок {offer["supplier"]}: варианты полной загрузки машин'
-    )
-    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle.paragraph_format.space_after = Pt(7)
-    subtitle.runs[0].font.size = Pt(10)
+    title_run.font.size = Pt(25)
+    title_run.font.color.rgb = RGBColor(11, 60, 98)
+    subtitle = document.add_paragraph("Полный перечень вариантов поставки с доставкой до объекта")
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    subtitle.paragraph_format.space_after = Pt(12)
+    subtitle.runs[0].font.size = Pt(11)
     subtitle.runs[0].font.color.rgb = RGBColor(92, 103, 117)
 
     metadata = document.add_table(rows=0, cols=4)
     metadata.style = "Table Grid"
     metadata_rows = [
-        ("Компания клиента", form.get("client_company") or "—", "ИНН", form.get("client_inn") or "—"),
-        ("Контактное лицо", form.get("client_contact_name") or "—", "Контакт", form.get("client_contact") or "—"),
-        ("Адрес доставки", form.get("address") or "—", "Дата", date.today().strftime("%d.%m.%Y")),
-        ("Производитель", offer["supplier"], "Наценка менеджера", f'{offer["markup"]:g}%'),
+        ("Для компании", form.get("client_company") or "—", "Дата", date.today().strftime("%d.%m.%Y")),
+        ("ИНН", form.get("client_inn") or "—", "Контактное лицо", form.get("client_contact_name") or "—"),
+        ("Адрес доставки", form.get("address") or "—", "Контакт", form.get("client_contact") or "—"),
     ]
     for left_label, left_value, right_label, right_value in metadata_rows:
         cells = metadata.add_row().cells
@@ -813,11 +844,11 @@ def build_catalog_proposal_document(offer, form):
         for index in (0, 2):
             cells[index].paragraphs[0].runs[0].bold = True
             _set_cell_fill(cells[index], "F1F5F9")
-    _format_table(metadata, [1.2, 4.05, 1.2, 3.45], header=False, font_size=8)
+    _format_table(metadata, [1.2, 4.05, 1.2, 3.45], header=False, font_size=8.5)
 
     intro = document.add_paragraph(
         "В таблицах ниже каждая строка — отдельный вариант поставки одной полной машиной. "
-        "Цена клиента включает стоимость изделий, доставку до указанного адреса и наценку менеджера."
+        "Все указанные цены являются конечными и включают доставку до адреса объекта."
     )
     intro.paragraph_format.space_before = Pt(6)
     intro.paragraph_format.space_after = Pt(4)
@@ -826,24 +857,23 @@ def build_catalog_proposal_document(offer, form):
         if vehicle_index:
             document.add_page_break()
         heading = document.add_paragraph(
-            f'{vehicle["vehicle"]} · грузоподъёмность {vehicle["capacity_t"]:g} т',
+            f'Варианты поставки: {vehicle["vehicle"]}, до {vehicle["capacity_t"]:g} т',
             style="Heading 2",
         )
         heading.paragraph_format.space_after = Pt(2)
         tariff = document.add_paragraph(
-            f'Доставка одной машины: {vehicle["trip_price"]:,.0f} ₽ · '
-            f'расстояние {vehicle["distance"]:.1f} км ({vehicle["distance_kind"]}) · '
-            f'рассчитано {vehicle["calculated_count"]} из {offer["products_count"]} позиций. '
-            f'Погрузка: {vehicle["loading_address"]}'.replace(",", " ")
+            f'Конечные цены рассчитаны с доставкой до указанного объекта. '
+            f'В предложение включено {offer["products_count"]} позиций.'
         )
         tariff.paragraph_format.space_after = Pt(4)
         tariff.runs[0].font.size = Pt(8.5)
+        tariff.runs[0].font.color.rgb = RGBColor(92, 103, 117)
 
-        table = document.add_table(rows=1, cols=8)
+        table = document.add_table(rows=1, cols=6)
         table.style = "Table Grid"
         headers = [
             "№", "Изделие / раздел", "Габариты / масса", "Полная загрузка",
-            "Цена завода", "Доставка / рейс", "Клиенту за 1 ед.", "Полная машина / статус",
+            "Цена за 1 ед. с доставкой", "Стоимость полной поставки",
         ]
         for cell, value in zip(table.rows[0].cells, headers):
             cell.text = value
@@ -852,38 +882,29 @@ def build_catalog_proposal_document(offer, form):
             cells = table.add_row().cells
             dimensions = row["dimensions"]
             dimension_note = f'{row["size_mm"]}; {row["weight_kg"]:g} кг'
-            if dimensions["estimated"]:
-                dimension_note += " (объём оценочный)"
             if row["client_unit"] is not None:
-                final_value = (
-                    f'{row["client_total"]:,.0f} ₽\n'
-                    f'Загрузка: {row["load_weight_kg"] / 1000:.2f} т; лимит: {row["limiting_factor"]}'
-                )
                 values = [
                     number,
                     f'{row["name"]}\n{row["group"]}',
                     dimension_note,
-                    f'{row["load_quantity"]} шт.',
-                    f'{row["price_rub"]:,.0f} ₽/шт.',
-                    f'{vehicle["trip_price"]:,.0f} ₽',
+                    f'{row["load_quantity"]} шт.\n{row["load_weight_kg"] / 1000:.2f} т',
                     f'{row["client_unit"]:,.0f} ₽',
-                    final_value,
+                    f'{row["client_total"]:,.0f} ₽',
                 ]
             else:
                 values = [
                     number, f'{row["name"]}\n{row["group"]}', dimension_note, "—",
-                    f'{row["price_rub"]:,.0f} ₽/шт.' if row["price_rub"] > 0 else "—",
-                    f'{vehicle["trip_price"]:,.0f} ₽', "—", row["status"],
+                    "Цена по запросу", "Цена по запросу",
                 ]
             for cell, value in zip(cells, values):
                 cell.text = str(value).replace(",", " ")
-        _format_table(table, [0.32, 2.35, 1.22, 0.78, 0.9, 0.92, 1.1, 2.31], font_size=7.2)
+        _format_table(table, [0.35, 3.2, 1.35, 1.2, 1.75, 2.05], font_size=7.8)
 
     document.add_paragraph("Условия предложения", style="Heading 2")
     document.add_paragraph(
-        "Расчёт носит коммерческий характер. Фактическую схему укладки, допустимую загрузку по осям, "
-        "наличие изделий и сроки отгрузки необходимо подтвердить у производителя перед заказом. "
-        "Для позиций с оценочным объёмом требуется дополнительная проверка габаритов."
+        "Предложение действительно при наличии продукции. Срок поставки и график рейсов "
+        "согласовываются при подтверждении заказа. Для позиций с отметкой «Цена по запросу» "
+        "стоимость уточняется менеджером."
     )
     document.add_paragraph("Реквизиты поставщика", style="Heading 2")
     requisites = document.add_table(rows=0, cols=4)
@@ -1101,11 +1122,10 @@ def catalog_proposal_docx():
     output = BytesIO()
     document.save(output)
     output.seek(0)
-    safe_supplier = re.sub(r"[^0-9A-Za-zА-Яа-я_-]+", "_", offer["supplier"]).strip("_")
     return send_file(
         output,
         as_attachment=True,
-        download_name=f"КП_полный_каталог_{safe_supplier}_{date.today().isoformat()}.docx",
+        download_name=f"КП_АР-ФАРВАТЕР_{date.today().isoformat()}.docx",
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
