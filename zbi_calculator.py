@@ -724,20 +724,17 @@ def build_proposal_document(quote, form):
     delivery_heading = document.add_paragraph("Доставка", style="Heading 2")
     delivery_heading.paragraph_format.space_before = Pt(10)
     delivery_heading.paragraph_format.space_after = Pt(5)
-    delivery_table = document.add_table(rows=1, cols=4)
+    delivery_table = document.add_table(rows=1, cols=2)
     delivery_table.style = "Table Grid"
-    for cell, value in zip(delivery_table.rows[0].cells, ["Транспорт", "Рейсы", "Загрузка на рейс", "Стоимость"]):
+    for cell, value in zip(delivery_table.rows[0].cells, ["Количество рейсов", "Загрузка одного рейса"]):
         cell.text = value
     for item in quote["deliveries"]:
         cells = delivery_table.add_row().cells
         loading = "; ".join(f'{line["name"]}: {line["quantity_per_trip"]}' for line in item["lines"])
-        values = [
-            item["vehicle"], item["trips"], loading,
-            f'{item["delivery_total"]:,.0f} ₽'.replace(",", " "),
-        ]
+        values = [item["trips"], loading]
         for cell, value in zip(cells, values):
             cell.text = str(value)
-    _format_table(delivery_table, [1.3, 0.7, 3.5, 1.55])
+    _format_table(delivery_table, [1.25, 5.8])
 
     total = document.add_paragraph()
     total.alignment = WD_ALIGN_PARAGRAPH.RIGHT
