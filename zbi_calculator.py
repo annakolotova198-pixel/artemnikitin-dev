@@ -1125,7 +1125,7 @@ def catalog_proposal_docx():
     return send_file(
         output,
         as_attachment=True,
-        download_name=f"КП_АР-ФАРВАТЕР_{date.today().isoformat()}.docx",
+        download_name=f"КП_АР-ФАРВАТЕР_полный_перечень_{date.today().isoformat()}.docx",
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
