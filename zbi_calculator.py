@@ -921,10 +921,11 @@ def build_catalog_proposal_document(offer, form):
         tariff.runs[0].font.size = Pt(8.5)
         tariff.runs[0].font.color.rgb = RGBColor(92, 103, 117)
 
-        table = document.add_table(rows=1, cols=6)
+        table = document.add_table(rows=1, cols=7)
         table.style = "Table Grid"
         headers = [
-            "№", "Изделие / раздел", "Габариты / масса", "Полная загрузка",
+            "№", "Изделие / раздел", "Габариты / масса", "Количество рейсов",
+            "Загрузка одного рейса",
             "Цена за 1 ед. с доставкой", "Стоимость полной поставки",
         ]
         for cell, value in zip(table.rows[0].cells, headers):
@@ -939,18 +940,19 @@ def build_catalog_proposal_document(offer, form):
                     number,
                     f'{row["name"]}\n{row["group"]}',
                     dimension_note,
+                    "1",
                     f'{row["load_quantity"]} шт.\n{row["load_weight_kg"] / 1000:.2f} т',
                     f'{row["client_unit"]:,.0f} ₽',
                     f'{row["client_total"]:,.0f} ₽',
                 ]
             else:
                 values = [
-                    number, f'{row["name"]}\n{row["group"]}', dimension_note, "—",
+                    number, f'{row["name"]}\n{row["group"]}', dimension_note, "—", "—",
                     "Цена по запросу", "Цена по запросу",
                 ]
             for cell, value in zip(cells, values):
                 cell.text = str(value).replace(",", " ")
-        _format_table(table, [0.35, 3.2, 1.35, 1.2, 1.75, 2.05], font_size=7.8)
+        _format_table(table, [0.3, 2.7, 1.2, 0.9, 1.15, 1.65, 1.85], font_size=7.6)
 
     document.add_paragraph("Условия предложения", style="Heading 2")
     document.add_paragraph(
