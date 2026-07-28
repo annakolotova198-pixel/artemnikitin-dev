@@ -611,7 +611,9 @@ class TelegramLeadService:
         self.index_chat_name = os.getenv("TG_INDEX_CHAT_NAME", "Бизнес Гид").strip()
         self.index_history_limit = env_int("TG_INDEX_HISTORY_LIMIT", 3000)
         self.indexed_chat_ids: set[int] = set()
+        self.indexed_entities: dict[int, object] = {}
         self.index_loaded = False
+        self.index_poll_seconds = max(env_int("TG_INDEX_POLL_SECONDS", 300), 60)
         self.history_limit = env_int("TG_HISTORY_LIMIT", 100)
         self.backfill = os.getenv("TG_BACKFILL", "1").strip().lower() not in {"0", "false", "no"}
         self.store = LeadStore(os.getenv("TG_DB_PATH", "telegram_leads.db"))
@@ -667,6 +669,7 @@ class TelegramLeadService:
     async def load_indexed_chats(self) -> None:
         """Build a fail-closed chat allowlist from links sent by «Бизнес Гид»."""
         self.indexed_chat_ids.clear()
+        self.indexed_entities.clear()
         if not self.index_chat_name:
             self.index_loaded = True
             return
@@ -713,6 +716,28 @@ class TelegramLeadService:
             username = (getattr(dialog.entity, "username", "") or "").lower()
             if username and username in public_usernames:
                 self.indexed_chat_ids.add(int(dialog.id))
+                self.indexed_entities[int(dialog.id)] = dialog.entity
+
+        resolved_public = 0
+        for username in sorted(public_usernames):
+            if any(
+                (getattr(entity, "username", "") or "").lower() == username
+                for entity in self.indexed_entities.values()
+            ):
+                continue
+            try:
+                entity = await self.user.get_entity(username)
+                peer_id = int(get_peer_id(entity))
+                if peer_id < 0:
+                    self.indexed_chat_ids.add(peer_id)
+                    self.indexed_entities[peer_id] = entity
+                    resolved_public += 1
+            except Exception as exc:
+                LOG.warning(
+                    "Не удалось открыть публичную ссылку @%s: %s",
+                    username,
+                    type(exc).__name__,
+                )
 
         for invite_hash in invite_hashes:
             try:
@@ -721,21 +746,32 @@ class TelegramLeadService:
                 )
                 chat = getattr(invite, "chat", None)
                 if chat is not None:
-                    self.indexed_chat_ids.add(int(get_peer_id(chat)))
+                    peer_id = int(get_peer_id(chat))
+                    self.indexed_chat_ids.add(peer_id)
+                    self.indexed_entities[peer_id] = chat
             except Exception as exc:
                 LOG.warning(
                     "Не удалось сопоставить приватную ссылку из «%s»: %s",
                     self.index_chat_name,
                     type(exc).__name__,
                 )
+                if hasattr(exc, "seconds"):
+                    LOG.warning(
+                        "Telegram ограничил проверку приватных приглашений на %s сек.; "
+                        "остальные приватные ссылки будут проверены при следующем запуске",
+                        getattr(exc, "seconds", "?"),
+                    )
+                    break
 
         self.index_loaded = True
         removed = self.store.retain_chat_ids(self.indexed_chat_ids)
         LOG.info(
-            "Индекс «%s»: ссылок %s, приватных приглашений %s, разрешено чатов %s, "
+            "Индекс «%s»: ссылок %s, разрешено публичных по ссылке %s, "
+            "приватных приглашений %s, разрешено чатов %s, "
             "удалено посторонних заявок %s",
             self.index_chat_name,
             len(public_usernames),
+            resolved_public,
             len(invite_hashes),
             len(self.indexed_chat_ids),
             removed,
@@ -882,19 +918,21 @@ class TelegramLeadService:
         if not self.backfill or self.history_limit <= 0:
             return
         scanned_chats = 0
-        async for dialog in self.user.iter_dialogs():
-            entity = dialog.entity
-            if not (dialog.is_group or dialog.is_channel):
-                continue
+        for chat_id, entity in list(self.indexed_entities.items()):
             username = getattr(entity, "username", "") or ""
-            if not self.chat_allowed(dialog.id, username):
+            if not self.chat_allowed(chat_id, username):
                 continue
             scanned_chats += 1
-            LOG.info("История: %s", dialog.name)
+            LOG.info("История разрешённого чата: %s", get_display_name(entity))
             async for message in self.user.iter_messages(entity, limit=self.history_limit, reverse=True):
                 if message.message:
                     await self.process_event(message, notify=False)
         LOG.info("История обработана: %s чатов, всего заявок %s", scanned_chats, self.store.count())
+
+    async def poll_indexed_history(self) -> None:
+        while True:
+            await self.scan_history()
+            await asyncio.sleep(self.index_poll_seconds)
 
     async def bot_command(self, event) -> None:
         text = (event.raw_text or "").strip()
@@ -971,7 +1009,9 @@ class TelegramLeadService:
         self.user.add_event_handler(self.process_event, events.NewMessage(incoming=True))
         self.bot.add_event_handler(self.bot_command, events.NewMessage(incoming=True))
         LOG.info("Telegram-парсер запущен")
-        history_task = asyncio.create_task(self.scan_history(), name="telegram-history-scan")
+        history_task = asyncio.create_task(
+            self.poll_indexed_history(), name="telegram-indexed-history-scan"
+        )
         try:
             await asyncio.gather(
                 self.user.run_until_disconnected(),
