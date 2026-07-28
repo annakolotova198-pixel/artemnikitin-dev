@@ -613,6 +613,11 @@ class TelegramLeadService:
             "photo.jpg" if media_type == "Фото" else f"attachment-{lead_id}"
         )
         target = getattr(event, "message", event)
+        # NewMessage.Event.message is a Telegram Message, while
+        # Message.message is only its text. Historical cards pass a Message
+        # directly, so keep that object instead of trying to download a string.
+        if isinstance(target, str) or not getattr(target, "media", None):
+            target = event
         await self.user.download_media(target, file=buffer)
         buffer.seek(0)
         await self.bot.send_file(
