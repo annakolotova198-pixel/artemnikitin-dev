@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -519,6 +520,26 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     asyncio.run(TelegramLeadService().run())
+
+
+_background_thread: threading.Thread | None = None
+
+
+def start_background_parser() -> threading.Thread | None:
+    """Starts one parser thread when TG_PARSER_ENABLED is explicitly enabled."""
+    global _background_thread
+    enabled = os.getenv("TG_PARSER_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
+    if not enabled:
+        return None
+    if _background_thread and _background_thread.is_alive():
+        return _background_thread
+    _background_thread = threading.Thread(
+        target=main,
+        name="telegram-lead-parser",
+        daemon=True,
+    )
+    _background_thread.start()
+    return _background_thread
 
 
 if __name__ == "__main__":
