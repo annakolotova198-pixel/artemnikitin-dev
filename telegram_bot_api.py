@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 1.1 seconds
-Output:
 """Telegram Bot API fallback for group construction leads.
 
 This mode does not need api_id/api_hash. It reads new messages from groups
