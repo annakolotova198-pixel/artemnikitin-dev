@@ -191,8 +191,16 @@ def extract_products(text: str) -> list[str]:
 def extract_quantities(text: str) -> list[dict[str, str]]:
     result = []
     for match in QUANTITY_RE.finditer(text):
+        # Do not confuse price abbreviations such as "23 т. руб."
+        # with tonnes requested for delivery.
+        unit_raw = re.sub(r"\s+", "", match.group("unit").lower())
+        tail = text[match.end() : match.end() + 12]
+        if unit_raw in {"т", "т.", "тн", "тн."} and re.match(
+            r"\s*(?:руб(?:\.|лей|ля)?|р\b)", tail, re.IGNORECASE
+        ):
+            continue
         number = match.group("number").replace(",", ".")
-        unit = re.sub(r"\s+", "", match.group("unit").lower())
+        unit = unit_raw
         unit_map = {
             "м3": "м³",
             "м³": "м³",
