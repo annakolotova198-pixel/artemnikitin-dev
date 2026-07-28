@@ -463,13 +463,22 @@ def row_to_text(row: sqlite3.Row, compact: bool = False) -> str:
             f'<a href="https://t.me/{html.escape(sender_username, quote=True)}">'
             f'{html.escape(sender_name)}</a> (@{html.escape(sender_username)})'
         )
+        sender_contact = (
+            f'<a href="https://t.me/{html.escape(sender_username, quote=True)}">'
+            f'Написать @{html.escape(sender_username)}</a>'
+        )
     elif sender_id:
         sender = (
             f'<a href="tg://user?id={int(sender_id)}">{html.escape(sender_name)}</a> '
             f"(ID {int(sender_id)})"
         )
+        sender_contact = (
+            f'<a href="tg://user?id={int(sender_id)}">Открыть профиль автора</a> '
+            "(публичный @username не установлен)"
+        )
     else:
         sender = html.escape(sender_name)
+        sender_contact = "профиль автора недоступен для этого типа публикации"
     lines = [
         f'🧱 <b>Заявка #{row["id"]}</b>',
         f"<b>Дата заявки:</b> {message_date} МСК",
@@ -481,6 +490,7 @@ def row_to_text(row: sqlite3.Row, compact: bool = False) -> str:
             [
                 f'<b>Адрес:</b> {html.escape(row["address"] or "не указан")}',
                 f"<b>Автор:</b> {sender}",
+                f"<b>Контакт автора:</b> {sender_contact}",
                 f'<b>ID автора:</b> {html.escape(str(sender_id or "не указан"))}',
                 f'<b>Контакты из текста:</b> {html.escape(", ".join(contacts_from_text) or "не указаны")}',
                 f'<b>Чат:</b> {html.escape(row["chat_title"])}',
@@ -611,6 +621,33 @@ class TelegramLeadService:
             caption=f"Вложение к заявке #{lead_id}: {media_type}",
         )
 
+    async def send_stored_media(self, owner_id: int, row: sqlite3.Row) -> None:
+        """Fetch a historical attachment from its source message and send it."""
+        if not row["media_type"] or int(row["media_size"] or 0) > 15 * 1024 * 1024:
+            return
+        try:
+            message = await self.user.get_messages(
+                int(row["chat_id"]), ids=int(row["message_id"])
+            )
+            if message:
+                await self.send_media(owner_id, message, int(row["id"]))
+        except Exception:
+            LOG.exception("Не удалось получить вложение для заявки %s", row["id"])
+
+    async def send_full_rows(self, event, rows: Iterable[sqlite3.Row]) -> None:
+        """Send each lead as a complete card so Telegram does not truncate it."""
+        sent = False
+        for row in rows:
+            sent = True
+            await event.respond(
+                row_to_text(row),
+                parse_mode="html",
+                link_preview=False,
+            )
+            await self.send_stored_media(int(event.sender_id), row)
+        if not sent:
+            await event.respond("Заявок пока нет.")
+
     async def process_event(self, event, notify: bool = True) -> int | None:
         if getattr(event, "is_private", False) or not event.raw_text:
             return None
@@ -705,15 +742,24 @@ class TelegramLeadService:
         elif command == "/status":
             response = f"✅ Парсер работает\nЗаявок в базе: <b>{self.store.count()}</b>"
         elif command == "/last":
-            limit = int(argument) if argument.isdigit() else 10
+            limit = min(max(int(argument), 1), 20) if argument.isdigit() else 10
             rows = self.store.recent(limit=limit)
-            response = "\n\n".join(row_to_text(row, compact=True) for row in rows) or "Заявок пока нет."
+            await self.send_full_rows(event, rows)
+            return
         elif command == "/lead" and argument.isdigit():
             row = self.store.by_id(int(argument))
-            response = row_to_text(row) if row else "Заявка не найдена."
+            if not row:
+                response = "Заявка не найдена."
+            else:
+                await self.send_full_rows(event, [row])
+                return
         elif command == "/search" and argument.strip():
             rows = self.store.recent(limit=15, query=argument.strip())
-            response = "\n\n".join(row_to_text(row, compact=True) for row in rows) or "Совпадений нет."
+            if not rows:
+                response = "Совпадений нет."
+            else:
+                await self.send_full_rows(event, rows)
+                return
         else:
             response = "Неизвестная команда. Используйте /help."
         await event.respond(response[:4000], parse_mode="html", link_preview=False)
@@ -792,6 +838,14 @@ class BotApiLeadService:
             },
         )
 
+    def send_full_rows(self, chat_id: int, rows: Iterable[sqlite3.Row]) -> None:
+        sent = False
+        for row in rows:
+            sent = True
+            self.send(chat_id, row_to_text(row))
+        if not sent:
+            self.send(chat_id, "Заявок пока нет.")
+
     def chat_allowed(self, chat_id: int, username: str = "") -> bool:
         keys = {str(chat_id).lower(), username.lower().lstrip("@")}
         if keys & self.blocklist:
@@ -841,15 +895,20 @@ class BotApiLeadService:
         elif command == "/status":
             response = f"✅ Парсер работает\nЗаявок в базе: <b>{self.store.count()}</b>"
         elif command == "/last":
-            limit = int(argument) if argument.isdigit() else 10
+            limit = min(max(int(argument), 1), 20) if argument.isdigit() else 10
             rows = self.store.recent(limit=limit)
-            response = "\n\n".join(row_to_text(row, compact=True) for row in rows) or "Заявок пока нет."
+            self.send_full_rows(chat_id, rows)
+            return True
         elif command == "/lead" and argument.isdigit():
             row = self.store.by_id(int(argument))
             response = row_to_text(row) if row else "Заявка не найдена."
         elif command == "/search" and argument.strip():
             rows = self.store.recent(limit=15, query=argument.strip())
-            response = "\n\n".join(row_to_text(row, compact=True) for row in rows) or "Совпадений нет."
+            if not rows:
+                response = "Совпадений нет."
+            else:
+                self.send_full_rows(chat_id, rows)
+                return True
         else:
             response = "Неизвестная команда. Используйте /help."
         self.send(chat_id, response)
