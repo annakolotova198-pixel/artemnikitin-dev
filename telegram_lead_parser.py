@@ -656,7 +656,8 @@ class TelegramLeadService:
         if not self.chat_allowed(event.chat_id, username):
             return None
         sender = await event.get_sender()
-        if getattr(sender, "bot", False):
+        sender_id = getattr(sender, "id", None)
+        if getattr(sender, "bot", False) or sender_id in self.owner_ids:
             return None
         media_type, media_name, media_mime, media_size = self.media_metadata(event)
         lead = parse_message(
@@ -664,7 +665,7 @@ class TelegramLeadService:
             chat_id=event.chat_id,
             message_id=event.id,
             chat_title=get_display_name(chat) or username or str(event.chat_id),
-            sender_id=getattr(sender, "id", None),
+            sender_id=sender_id,
             sender_name=get_display_name(sender) if sender else "",
             sender_username=getattr(sender, "username", "") or "",
             source_link=await self.source_link(event, username),
@@ -770,8 +771,10 @@ class TelegramLeadService:
         await self.bot.start(bot_token=self.bot_token)
         bot_me = await self.bot.get_me()
         removed = self.store.delete_by_sender(int(bot_me.id))
+        for owner_id in self.owner_ids:
+            removed += self.store.delete_by_sender(int(owner_id))
         if removed:
-            LOG.info("Удалено ошибочных заявок от бота: %s", removed)
+            LOG.info("Удалено ошибочных заявок от бота и владельцев: %s", removed)
         self.user.add_event_handler(self.process_event, events.NewMessage(incoming=True))
         self.bot.add_event_handler(self.bot_command, events.NewMessage(incoming=True))
         LOG.info("Telegram-парсер запущен")
