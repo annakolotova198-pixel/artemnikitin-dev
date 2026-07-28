@@ -29,6 +29,13 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except ImportError:
+    gspread = None
+    Credentials = None
+
+try:
     from telethon import TelegramClient, events, functions, types
     from telethon.sessions import StringSession
     from telethon.utils import get_display_name, get_peer_id
@@ -75,6 +82,11 @@ PRODUCT_PATTERNS = {
     "Газоблок": (r"\bгазоблок\w*\b", r"газобетонн\w*\s+блок"),
     "Арматура": (r"\bарматур\w*\b",),
     "Металлопрокат": (r"\bметаллопрокат\w*\b", r"\bшвеллер\w*\b", r"\bдвутавр\w*\b"),
+    "Асфальт": (r"\bасфальт(?:а|ом|ный|ная|ное)?\b",),
+    "Сухие смеси": (r"\bсух\w*\s+смес", r"\bштукатурк\w*\b", r"\bшпакл[её]вк\w*\b"),
+    "Пиломатериалы": (r"\bпиломатериал\w*\b", r"\bдоск(?:а|и|у)\b", r"\bбрус\w*\b"),
+    "Кровельные материалы": (r"\bкровельн\w*\s+материал", r"\bпрофнастил\w*\b", r"\bрубероид\w*\b"),
+    "Утеплитель": (r"\bутеплител\w*\b", r"\bминват\w*\b", r"\bпеноплекс\w*\b"),
     "Грузоперевозки": (
         r"\bгрузоперевоз\w*\b",
         r"\bшаланд\w*\b",
@@ -87,6 +99,13 @@ PRODUCT_PATTERNS = {
         r"\bавтокран\w*\b",
         r"\bбульдозер\w*\b",
     ),
+    "Вывоз грунта и мусора": (
+        r"\bвывоз\w*\s+(?:грунт|мусор|снег)",
+        r"\bутилизац\w*\s+(?:грунт|мусор)",
+    ),
+    "Земляные работы": (r"\bземлян\w*\s+работ", r"\bразработк\w*\s+котлован"),
+    "Демонтаж": (r"\bдемонтаж\w*\b", r"\bснос\w*\b"),
+    "Благоустройство": (r"\bблагоустройств\w*\b", r"\bукладк\w*\s+(?:асфальт|плитк)"),
 }
 
 REQUEST_PATTERNS = (
@@ -102,11 +121,36 @@ REQUEST_PATTERNS = (
 )
 
 OFFER_PATTERNS = (
-    r"\bпрода(?:м|ем|ётся|ется)\b",
+    r"\bпрода(?:ю|ём|ем|м|ётся|ется)\b",
     r"\bпредлага(?:ю|ем)\b",
     r"\bв\s+наличии\b",
     r"\bсобственное\s+производство\b",
     r"\bоказываем\s+услуги\b",
+    r"\bпредоставля(?:ю|ем)\b",
+    r"\bдостав(?:им|ляем|ка\s+от)\b",
+    r"\bработаем\s+(?:по|с)\b",
+    r"\bцена\s+(?:от|за)\b",
+    r"\bпрайс\b",
+    r"\bобращайтесь\b",
+    r"\bзвоните\b",
+    r"\bсамовывоз\b",
+    r"\bотгрузк\w*\b",
+    r"\bаренд\w*\b",
+)
+
+SERVICE_PRODUCTS = {
+    "Грузоперевозки",
+    "Спецтехника",
+    "Вывоз грунта и мусора",
+    "Земляные работы",
+    "Демонтаж",
+    "Благоустройство",
+}
+PRICE_RE = re.compile(
+    r"(?<!\d)(?:от\s*)?\d[\d\s]*(?:[.,]\d+)?\s*"
+    r"(?:₽|руб(?:\.|лей|ля)?|р\.)"
+    r"(?:\s*(?:/|за)\s*(?:м\s*[³3]|куб|т(?:онн\w*)?|кг|шт\.?|рейс|час|смен\w*))?",
+    re.IGNORECASE,
 )
 
 QUANTITY_RE = re.compile(
@@ -120,7 +164,8 @@ PHONE_RE = re.compile(r"(?<!\d)(?:\+7|8)[\s()\-]*\d{3}[\s()\-]*\d{3}[\s\-]*\d{2}
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[a-zа-я]{2,}\b", re.IGNORECASE)
 USERNAME_RE = re.compile(r"(?<![\w@])@[a-zA-Z][a-zA-Z0-9_]{4,31}\b")
 ADDRESS_HINT_RE = re.compile(
-    r"(?:адрес|доставк\w*(?:\s+(?:на|в|до))?|объект|обьект|точка|выгрузк\w*)\s*[:\-]?\s*(.+)",
+    r"(?:адрес|доставк\w*(?:\s+(?:на|в|до))?|объект|обьект|точка|выгрузк\w*|"
+    r"база|склад|карьер|производство)\s*[:\-]?\s*(.+)",
     re.IGNORECASE,
 )
 LOCATION_WORDS_RE = re.compile(
@@ -170,6 +215,30 @@ class ParsedLead:
     message_text: str
     message_date: str
     created_at: str
+
+
+@dataclass
+class ParsedProviderOffer:
+    fingerprint: str
+    dedupe_key: str
+    category: str
+    chat_id: int
+    message_id: int
+    chat_title: str
+    sender_id: int | None
+    sender_name: str
+    sender_username: str
+    items: list[str]
+    prices: list[str]
+    phones: list[str]
+    emails: list[str]
+    telegram_contacts: list[str]
+    address: str
+    source_link: str
+    message_text: str
+    message_date: str
+    first_seen: str
+    last_seen: str
 
 
 def env_int(name: str, default: int = 0) -> int:
@@ -284,12 +353,22 @@ def extract_address(text: str) -> str:
     return ""
 
 
-def is_probable_request(text: str, products: list[str], quantities: list[dict[str, str]]) -> bool:
-    if not products:
+def extract_prices(text: str) -> list[str]:
+    return unique(re.sub(r"\s+", " ", match.group(0)).strip() for match in PRICE_RE.finditer(text))
+
+
+def is_probable_request(
+    text: str,
+    products: list[str],
+    quantities: list[dict[str, str]],
+    address: str = "",
+) -> bool:
+    goods = [product for product in products if product not in SERVICE_PRODUCTS]
+    if not goods or not quantities or not address:
         return False
     request_score = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in REQUEST_PATTERNS)
     offer_score = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in OFFER_PATTERNS)
-    if offer_score and not request_score:
+    if request_score < 1 or offer_score:
         return False
     if (
         len(text) > 1000
@@ -304,7 +383,17 @@ def is_probable_request(text: str, products: list[str], quantities: list[dict[st
         )
     ):
         return False
-    return request_score > 0 or bool(quantities)
+    return True
+
+
+def is_probable_provider_offer(text: str, products: list[str], prices: list[str]) -> bool:
+    if not products:
+        return False
+    request_score = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in REQUEST_PATTERNS)
+    offer_score = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in OFFER_PATTERNS)
+    if request_score and not offer_score:
+        return False
+    return offer_score > 0 or bool(prices)
 
 
 def parse_message(
@@ -328,7 +417,8 @@ def parse_message(
     clean_text = re.sub(r"\r\n?", "\n", text or "").strip()
     products = extract_products(clean_text)
     quantities = extract_quantities(clean_text)
-    if not is_probable_request(clean_text, products, quantities):
+    address = extract_address(clean_text)
+    if not is_probable_request(clean_text, products, quantities, address):
         return None
 
     phones = unique(normalize_phone(match.group(0)) for match in PHONE_RE.finditer(clean_text))
@@ -346,12 +436,12 @@ def parse_message(
         sender_id=sender_id,
         sender_name=sender_name,
         sender_username=sender_username,
-        products=products,
+        products=[product for product in products if product not in SERVICE_PRODUCTS],
         quantities=quantities,
         phones=phones,
         emails=emails,
         telegram_contacts=telegram_contacts,
-        address=extract_address(clean_text),
+        address=address,
         source_link=source_link,
         media_type=media_type,
         media_name=media_name,
@@ -363,6 +453,78 @@ def parse_message(
         message_date=date,
         created_at=now,
     )
+
+
+def parse_provider_offers(
+    *,
+    text: str,
+    chat_id: int,
+    message_id: int,
+    chat_title: str,
+    sender_id: int | None = None,
+    sender_name: str = "",
+    sender_username: str = "",
+    source_link: str = "",
+    message_date: datetime | None = None,
+) -> list[ParsedProviderOffer]:
+    clean_text = re.sub(r"\r\n?", "\n", text or "").strip()
+    products = extract_products(clean_text)
+    prices = extract_prices(clean_text)
+    if not is_probable_provider_offer(clean_text, products, prices):
+        return []
+
+    phones = unique(normalize_phone(match.group(0)) for match in PHONE_RE.finditer(clean_text))
+    emails = unique(match.group(0).lower() for match in EMAIL_RE.finditer(clean_text))
+    telegram_contacts = unique(match.group(0) for match in USERNAME_RE.finditer(clean_text))
+    identity = (
+        "|".join(sorted(phones))
+        or "|".join(sorted(value.lower() for value in telegram_contacts))
+        or sender_username.lower().lstrip("@")
+        or str(sender_id or "")
+        or sender_name.casefold()
+    )
+    date = (message_date or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
+    groups = (
+        ("Товары", [product for product in products if product not in SERVICE_PRODUCTS]),
+        ("Услуги", [product for product in products if product in SERVICE_PRODUCTS]),
+    )
+    offers: list[ParsedProviderOffer] = []
+    for category, items in groups:
+        if not items:
+            continue
+        # One supplier has one row per category. Repeated advertisements update
+        # that row and enrich its assortment instead of creating duplicates.
+        dedupe_source = f"{category}|{identity}"
+        dedupe_key = hashlib.sha256(dedupe_source.encode("utf-8")).hexdigest()
+        fingerprint = hashlib.sha256(
+            f"{chat_id}:{message_id}:{category}".encode("utf-8")
+        ).hexdigest()
+        offers.append(
+            ParsedProviderOffer(
+                fingerprint=fingerprint,
+                dedupe_key=dedupe_key,
+                category=category,
+                chat_id=chat_id,
+                message_id=message_id,
+                chat_title=chat_title,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                sender_username=sender_username,
+                items=items,
+                prices=prices,
+                phones=phones,
+                emails=emails,
+                telegram_contacts=telegram_contacts,
+                address=extract_address(clean_text),
+                source_link=source_link,
+                message_text=clean_text[:6000],
+                message_date=date,
+                first_seen=now,
+                last_seen=now,
+            )
+        )
+    return offers
 
 
 class LeadStore:
@@ -434,6 +596,45 @@ class LeadStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_provider_offers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dedupe_key TEXT NOT NULL UNIQUE,
+                    category TEXT NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    chat_title TEXT NOT NULL,
+                    sender_id INTEGER,
+                    sender_name TEXT,
+                    sender_username TEXT,
+                    items_json TEXT NOT NULL,
+                    prices_json TEXT NOT NULL,
+                    phones_json TEXT NOT NULL,
+                    emails_json TEXT NOT NULL,
+                    telegram_contacts_json TEXT NOT NULL,
+                    address TEXT,
+                    source_link TEXT,
+                    message_text TEXT NOT NULL,
+                    message_date TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    seen_count INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_provider_messages (
+                    fingerprint TEXT PRIMARY KEY,
+                    dedupe_key TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tg_provider_category "
+                "ON telegram_provider_offers(category, last_seen DESC)"
+            )
 
     def add(self, lead: ParsedLead) -> int | None:
         data = asdict(lead)
@@ -454,6 +655,110 @@ class LeadStore:
     def count(self) -> int:
         with self.connect() as connection:
             return int(connection.execute("SELECT COUNT(*) FROM telegram_leads").fetchone()[0])
+
+    def add_or_update_offer(self, offer: ParsedProviderOffer) -> tuple[sqlite3.Row | None, bool]:
+        data = asdict(offer)
+        fingerprint = data.pop("fingerprint")
+        with self.connect() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO telegram_provider_messages (fingerprint, dedupe_key) VALUES (?, ?)",
+                    (fingerprint, offer.dedupe_key),
+                )
+            except sqlite3.IntegrityError:
+                return None, False
+            existing = connection.execute(
+                "SELECT * FROM telegram_provider_offers WHERE dedupe_key=?",
+                (offer.dedupe_key,),
+            ).fetchone()
+            for key in ("items", "prices", "phones", "emails", "telegram_contacts"):
+                values = data.pop(key)
+                if existing:
+                    values = unique(json.loads(existing[f"{key}_json"]) + values)
+                data[f"{key}_json"] = json.dumps(values, ensure_ascii=False)
+            if existing:
+                data["first_seen"] = existing["first_seen"]
+                if not data["address"]:
+                    data["address"] = existing["address"]
+            columns = ", ".join(data)
+            placeholders = ", ".join("?" for _ in data)
+            update_columns = ", ".join(
+                f"{column}=excluded.{column}"
+                for column in data
+                if column not in {"dedupe_key", "first_seen"}
+            )
+            connection.execute(
+                f"""
+                INSERT INTO telegram_provider_offers ({columns})
+                VALUES ({placeholders})
+                ON CONFLICT(dedupe_key) DO UPDATE SET
+                    {update_columns},
+                    seen_count=telegram_provider_offers.seen_count + 1
+                """,
+                tuple(data.values()),
+            )
+            row = connection.execute(
+                "SELECT * FROM telegram_provider_offers WHERE dedupe_key=?",
+                (offer.dedupe_key,),
+            ).fetchone()
+            return row, True
+
+    def offer_count(self, category: str = "") -> int:
+        with self.connect() as connection:
+            if category:
+                return int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM telegram_provider_offers WHERE category=?",
+                        (category,),
+                    ).fetchone()[0]
+                )
+            return int(
+                connection.execute("SELECT COUNT(*) FROM telegram_provider_offers").fetchone()[0]
+            )
+
+    def offers_by_keys(self, keys: Iterable[str]) -> list[sqlite3.Row]:
+        values = list(dict.fromkeys(keys))
+        if not values:
+            return []
+        placeholders = ",".join("?" for _ in values)
+        with self.connect() as connection:
+            return list(
+                connection.execute(
+                    f"SELECT * FROM telegram_provider_offers WHERE dedupe_key IN ({placeholders})",
+                    values,
+                )
+            )
+
+    def all_offer_keys(self) -> set[str]:
+        with self.connect() as connection:
+            return {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT dedupe_key FROM telegram_provider_offers"
+                )
+            }
+
+    def prune_invalid_leads(self) -> int:
+        invalid_ids: list[int] = []
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, message_text, products_json, quantities_json, address FROM telegram_leads"
+            ).fetchall()
+            for row in rows:
+                if not is_probable_request(
+                    row["message_text"],
+                    json.loads(row["products_json"]),
+                    json.loads(row["quantities_json"]),
+                    row["address"] or "",
+                ):
+                    invalid_ids.append(int(row["id"]))
+            if invalid_ids:
+                placeholders = ",".join("?" for _ in invalid_ids)
+                connection.execute(
+                    f"DELETE FROM telegram_leads WHERE id IN ({placeholders})",
+                    invalid_ids,
+                )
+        return len(invalid_ids)
 
     def delete_by_sender(self, sender_id: int) -> int:
         with self.connect() as connection:
@@ -478,6 +783,34 @@ class LeadStore:
                 cursor = connection.execute(
                     f"DELETE FROM telegram_leads WHERE chat_id NOT IN ({placeholders})",
                     tuple(sorted(chat_ids)),
+                )
+            return int(cursor.rowcount)
+
+    def retain_offer_chat_ids(self, chat_ids: set[int]) -> int:
+        with self.connect() as connection:
+            if not chat_ids:
+                cursor = connection.execute("DELETE FROM telegram_provider_offers")
+                connection.execute("DELETE FROM telegram_provider_messages")
+                return int(cursor.rowcount)
+            placeholders = ",".join("?" for _ in chat_ids)
+            keys = [
+                row[0]
+                for row in connection.execute(
+                    f"SELECT dedupe_key FROM telegram_provider_offers "
+                    f"WHERE chat_id NOT IN ({placeholders})",
+                    tuple(sorted(chat_ids)),
+                )
+            ]
+            cursor = connection.execute(
+                f"DELETE FROM telegram_provider_offers WHERE chat_id NOT IN ({placeholders})",
+                tuple(sorted(chat_ids)),
+            )
+            if keys:
+                key_placeholders = ",".join("?" for _ in keys)
+                connection.execute(
+                    f"DELETE FROM telegram_provider_messages "
+                    f"WHERE dedupe_key IN ({key_placeholders})",
+                    keys,
                 )
             return int(cursor.rowcount)
 
@@ -597,6 +930,134 @@ def row_to_text(row: sqlite3.Row, compact: bool = False) -> str:
     return "\n".join(lines)
 
 
+class ProviderSheetExporter:
+    HEADERS = [
+        "Ключ",
+        "Тип",
+        "Товары / услуги",
+        "Цены",
+        "Компания / автор",
+        "Телефон",
+        "Telegram",
+        "Email",
+        "Адрес / регион",
+        "Чат",
+        "Ссылка на объявление",
+        "Первое обнаружение",
+        "Последнее обновление",
+        "Повторов найдено",
+        "Текст объявления",
+    ]
+
+    def __init__(self):
+        self.sheet_id = (
+            os.getenv("TG_SUPPLIERS_SHEET_ID", "").strip()
+            or os.getenv("GOOGLE_SHEET_ID", "").strip()
+            or "1Zb-38mYR63KCnI7JjTZGoedm9LGFZ3snfhoaYBMwuwo"
+        )
+        self.credentials_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+        self.worksheet_names = {
+            "Товары": os.getenv("TG_GOODS_SHEET_NAME", "Поставщики_Товары").strip(),
+            "Услуги": os.getenv("TG_SERVICES_SHEET_NAME", "Поставщики_Услуги").strip(),
+        }
+        self._book = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(
+            gspread
+            and Credentials
+            and self.sheet_id
+            and self.credentials_json
+        )
+
+    def _open(self):
+        if self._book is not None:
+            return self._book
+        if not self.enabled:
+            raise RuntimeError(
+                "Google Sheets export disabled: GOOGLE_SERVICE_ACCOUNT_JSON is not configured"
+            )
+        info = json.loads(self.credentials_json)
+        credentials = Credentials.from_service_account_info(
+            info,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ],
+        )
+        self._book = gspread.authorize(credentials).open_by_key(self.sheet_id)
+        return self._book
+
+    def _worksheet(self, category: str):
+        book = self._open()
+        title = self.worksheet_names[category]
+        try:
+            worksheet = book.worksheet(title)
+        except gspread.WorksheetNotFound:
+            worksheet = book.add_worksheet(title=title, rows=1000, cols=len(self.HEADERS))
+        values = worksheet.row_values(1)
+        if values != self.HEADERS:
+            worksheet.update(range_name="A1:O1", values=[self.HEADERS])
+            worksheet.freeze(rows=1)
+        return worksheet
+
+    @staticmethod
+    def _row_values(row: sqlite3.Row) -> list[object]:
+        contacts = unique(
+            json.loads(row["telegram_contacts_json"])
+            + ([f'@{row["sender_username"].lstrip("@")}'] if row["sender_username"] else [])
+        )
+        return [
+            row["dedupe_key"],
+            row["category"],
+            ", ".join(json.loads(row["items_json"])),
+            ", ".join(json.loads(row["prices_json"])),
+            row["sender_name"] or row["sender_username"] or str(row["sender_id"] or ""),
+            ", ".join(json.loads(row["phones_json"])),
+            ", ".join(contacts),
+            ", ".join(json.loads(row["emails_json"])),
+            row["address"] or "",
+            row["chat_title"],
+            row["source_link"] or "",
+            row["first_seen"],
+            row["last_seen"],
+            int(row["seen_count"]),
+            row["message_text"],
+        ]
+
+    def sync(self, rows: Iterable[sqlite3.Row]) -> int:
+        grouped: dict[str, list[sqlite3.Row]] = {"Товары": [], "Услуги": []}
+        for row in rows:
+            grouped[row["category"]].append(row)
+        synced = 0
+        for category, category_rows in grouped.items():
+            if not category_rows:
+                continue
+            worksheet = self._worksheet(category)
+            existing_values = worksheet.get_all_values()
+            row_by_key = {
+                values[0]: index
+                for index, values in enumerate(existing_values[1:], start=2)
+                if values
+            }
+            append_values: list[list[object]] = []
+            for row in category_rows:
+                values = self._row_values(row)
+                existing_row = row_by_key.get(row["dedupe_key"])
+                if existing_row:
+                    worksheet.update(
+                        range_name=f"A{existing_row}:O{existing_row}",
+                        values=[values],
+                    )
+                else:
+                    append_values.append(values)
+                synced += 1
+            if append_values:
+                worksheet.append_rows(append_values, value_input_option="USER_ENTERED")
+        return synced
+
+
 class TelegramLeadService:
     def __init__(self):
         if TelegramClient is None:
@@ -629,6 +1090,8 @@ class TelegramLeadService:
         self.history_limit = env_int("TG_HISTORY_LIMIT", 100)
         self.backfill = os.getenv("TG_BACKFILL", "1").strip().lower() not in {"0", "false", "no"}
         self.store = LeadStore(os.getenv("TG_DB_PATH", "telegram_leads.db"))
+        self.sheet_exporter = ProviderSheetExporter()
+        self.pending_offer_keys: set[str] = self.store.all_offer_keys()
         stored_owner_ids = self.store.get_config("owner_ids")
         self.owner_ids.update(
             int(value) for value in stored_owner_ids.split(",") if value.strip().lstrip("-").isdigit()
@@ -710,11 +1173,13 @@ class TelegramLeadService:
         if not candidates:
             self.index_loaded = True
             removed = self.store.retain_chat_ids(set())
+            removed_offers = self.store.retain_offer_chat_ids(set())
             LOG.error(
                 "Переписка-индекс «%s» не найдена; все чаты заблокированы, "
-                "удалено заявок %s",
+                "удалено заявок %s и предложений %s",
                 self.index_chat_name,
                 removed,
+                removed_offers,
             )
             return
 
@@ -764,6 +1229,7 @@ class TelegramLeadService:
 
         self.index_loaded = True
         removed = self.store.retain_chat_ids(self.indexed_chat_ids)
+        removed_offers = self.store.retain_offer_chat_ids(self.indexed_chat_ids)
         LOG.info(
             "Индекс «%s»: ссылок %s, разрешено публичных по ссылке %s, "
             "приватных приглашений %s, разрешено чатов %s, "
@@ -775,6 +1241,8 @@ class TelegramLeadService:
             len(self.indexed_chat_ids),
             removed,
         )
+        if removed_offers:
+            LOG.info("Удалено предложений из посторонних чатов: %s", removed_offers)
 
     async def add_to_index_folder(self, entity) -> None:
         """Add one managed chat to a dedicated Telegram chat folder."""
@@ -1050,7 +1518,7 @@ class TelegramLeadService:
         if getattr(sender, "bot", False) or sender_id in self.owner_ids:
             return None
         media_type, media_name, media_mime, media_size = self.media_metadata(event)
-        lead = parse_message(
+        common = dict(
             text=event.raw_text,
             chat_id=event.chat_id,
             message_id=event.id,
@@ -1059,17 +1527,22 @@ class TelegramLeadService:
             sender_name=get_display_name(sender) if sender else "",
             sender_username=getattr(sender, "username", "") or "",
             source_link=await self.source_link(event, username),
+            message_date=event.date,
+        )
+        lead = parse_message(
+            **common,
             media_type=media_type,
             media_name=media_name,
             media_mime=media_mime,
             media_size=media_size,
             forwarded_from=self.forwarded_from(event),
             reply_to_message_id=getattr(event, "reply_to_msg_id", None),
-            message_date=event.date,
         )
-        if not lead:
-            return None
-        lead_id = self.store.add(lead)
+        for offer in parse_provider_offers(**common):
+            offer_row, changed = self.store.add_or_update_offer(offer)
+            if changed and offer_row:
+                self.pending_offer_keys.add(str(offer_row["dedupe_key"]))
+        lead_id = self.store.add(lead) if lead else None
         if lead_id and notify:
             row = self.store.by_id(lead_id)
             for owner_id in self.owner_ids:
@@ -1084,6 +1557,29 @@ class TelegramLeadService:
                 except Exception:
                     LOG.exception("Не удалось отправить заявку владельцу %s", owner_id)
         return lead_id
+
+    async def sync_provider_sheets(self) -> None:
+        while True:
+            await asyncio.sleep(15)
+            if not self.pending_offer_keys:
+                continue
+            keys = set(self.pending_offer_keys)
+            self.pending_offer_keys.difference_update(keys)
+            rows = self.store.offers_by_keys(keys)
+            if not rows:
+                continue
+            if not self.sheet_exporter.enabled:
+                LOG.warning(
+                    "Google Sheets для поставщиков не настроен; %s записей сохранены в SQLite",
+                    len(rows),
+                )
+                continue
+            try:
+                synced = await asyncio.to_thread(self.sheet_exporter.sync, rows)
+                LOG.info("В Google Таблицу выгружено предложений: %s", synced)
+            except Exception:
+                self.pending_offer_keys.update(keys)
+                LOG.exception("Не удалось синхронизировать базу поставщиков с Google Таблицей")
 
     async def scan_history(self) -> None:
         if not self.backfill or self.history_limit <= 0:
@@ -1150,7 +1646,10 @@ class TelegramLeadService:
             response = (
                 f"✅ Парсер работает\n{index_status}\n"
                 f"Организовано в папку и архив: <b>{len(self.managed_chat_ids)}</b>\n"
-                f"Заявок в базе: <b>{self.store.count()}</b>"
+                f"Заявок покупателей: <b>{self.store.count()}</b>\n"
+                f"Поставщиков товаров: <b>{self.store.offer_count('Товары')}</b>\n"
+                f"Поставщиков услуг: <b>{self.store.offer_count('Услуги')}</b>\n"
+                f"Google Таблица: <b>{'подключена' if self.sheet_exporter.enabled else 'не настроена'}</b>"
             )
         elif command == "/last":
             limit = min(max(int(argument), 1), 20) if argument.isdigit() else 10
@@ -1180,6 +1679,9 @@ class TelegramLeadService:
         await self.user.start()
         await self.bot.start(bot_token=self.bot_token)
         bot_me = await self.bot.get_me()
+        pruned = self.store.prune_invalid_leads()
+        if pruned:
+            LOG.info("Удалено записей, не отвечающих строгому фильтру: %s", pruned)
         removed = self.store.delete_by_sender(int(bot_me.id))
         for owner_id in self.owner_ids:
             removed += self.store.delete_by_sender(int(owner_id))
@@ -1197,6 +1699,9 @@ class TelegramLeadService:
         membership_task = asyncio.create_task(
             self.manage_indexed_memberships(), name="telegram-indexed-membership-manager"
         )
+        sheet_task = asyncio.create_task(
+            self.sync_provider_sheets(), name="telegram-provider-sheet-sync"
+        )
         try:
             await asyncio.gather(
                 self.user.run_until_disconnected(),
@@ -1206,6 +1711,7 @@ class TelegramLeadService:
             index_task.cancel()
             history_task.cancel()
             membership_task.cancel()
+            sheet_task.cancel()
 
 
 class BotApiLeadService:
