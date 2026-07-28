@@ -85,6 +85,8 @@ def material_group(material_name):
             return "Песок — крупный"
         return "Песок — крупность не указана"
 
+    if "известняк" in text or "известков" in text:
+        return "Известняковый щебень"
     if "вторич" in text or "рецикл" in text or "дроблен" in text:
         return "Вторичный / рецикл щебень"
     if "щебень" in text:
@@ -116,6 +118,24 @@ def normalize_material_search(value):
     return " ".join(re.findall(r"[a-zа-я0-9]+", text))
 
 
+def expand_material_abbreviations(value):
+    """Расшифровывает отраслевые сокращения, сохраняя исходные значения."""
+    text = str(value or "").strip()
+    replacements = (
+        (r"\bПГС\b", "ПГС (песчано-гравийная смесь)"),
+        (r"\bГПС\b", "ГПС (гравийно-песчаная смесь)"),
+        (r"\bЩПС\b", "ЩПС (щебёночно-песчаная смесь)"),
+        (r"\bм\.?\s*к\.?\b", "модуль крупности"),
+        (r"\bк\.?\s*ф\.?\b", "коэффициент фильтрации"),
+        (r"\bм\s*/\s*сут\b", "метров в сутки"),
+        (r"\bфр\.?\s*(?=\d)", "фракция "),
+        (r"\bГОСТ\b", "ГОСТ (государственный стандарт)"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def material_family(material_name):
     """Определяет товарное семейство для варианта «любой»."""
     primary_name = re.split(r"[\(\[,;/]", str(material_name or ""), maxsplit=1)[0]
@@ -123,6 +143,7 @@ def material_family(material_name):
     known_families = (
         (("керамзит",), "Керамзит"),
         (("песок", "пескогрунт"), "Песок"),
+        (("известняковый щебень", "известняковый", "известняк", "известковый щебень"), "Известняковый щебень"),
         (("щебень", "щебенка"), "Щебень"),
         (("пгс", "гпс", "песчано гравийн", "гравийно песчан"), "ПГС / ГПС"),
         (("щпс",), "ЩПС"),
@@ -174,18 +195,20 @@ def build_material_suggestions(df):
     ):
         suggestions.append({
             "value": "family:" + family_key,
-            "label": family + " — любой",
+            "label": expand_material_abbreviations(family) + " — любой",
             "family": family_key,
             "kind": "any",
-            "search": normalize_material_search(family),
+            "search": normalize_material_search(family + " " + expand_material_abbreviations(family)),
         })
         for product in family_products:
             suggestions.append({
                 "value": "product:" + product,
-                "label": product,
+                "label": expand_material_abbreviations(product),
                 "family": family_key,
                 "kind": "product",
-                "search": normalize_material_search(family + " " + product),
+                "search": normalize_material_search(
+                    family + " " + product + " " + expand_material_abbreviations(product)
+                ),
             })
     return suggestions
 
@@ -662,6 +685,7 @@ def home():
         <div class="container">
             <h1>Калькулятор доставки материалов</h1>
             <p>
+                <a href="/materials-request" style="font-size:18px; font-weight:bold; margin-right:20px;">Заявка из нескольких материалов</a>
                 <a href="/careers" style="font-size:18px; font-weight:bold; margin-right:20px;">Список всех карьеров</a>
                 <a href="/zbi" style="font-size:18px; font-weight:bold; margin-right:20px;">Калькулятор ЖБИ</a>
                 <a href="/carriers" style="font-size:18px; font-weight:bold; margin-right:20px;">Перевозчики</a>
@@ -2339,6 +2363,12 @@ def crm_deal_page(deal_id):
     </body>
     </html>
     """
+
+
+from materials_multi import materials_multi_bp
+
+if "materials_multi" not in app.blueprints:
+    app.register_blueprint(materials_multi_bp)
 
 
 if __name__ == "__main__":
