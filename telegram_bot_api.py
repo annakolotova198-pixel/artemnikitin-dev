@@ -40,8 +40,6 @@ class BotApiLeadService:
         missing = []
         if not self.bot_token:
             missing.append("TG_BOT_TOKEN")
-        if not self.owner_ids and not self.claim_token:
-            missing.append("TG_OWNER_IDS или TG_OWNER_CLAIM_TOKEN")
         if missing:
             raise RuntimeError("Не заданы переменные окружения: " + ", ".join(missing))
 
@@ -97,6 +95,10 @@ class BotApiLeadService:
         command = command.lower().split("@")[0]
         sender_id = int(message.get("from", {}).get("id", 0))
         chat_id = int(message["chat"]["id"])
+
+        if command == "/id":
+            self.send(chat_id, f"Ваш Telegram ID: <code>{sender_id}</code>")
+            return True
 
         if sender_id not in self.owner_ids:
             valid_claim = (
@@ -211,5 +213,4 @@ def start_background_parser() -> threading.Thread | None:
     _thread = threading.Thread(target=BotApiLeadService().run, name="telegram-bot-api", daemon=True)
     _thread.start()
     return _thread
-
 
