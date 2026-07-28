@@ -90,6 +90,7 @@ def load_catalog():
         if item.get("supplier") == "ИП Михайлов" and str(item.get("name") or "").strip().upper().startswith("ПД "):
             item["group"] = "Лотки и водоотвод"
         item["id"] = str(index)
+        item["unit"] = str(item.get("unit") or "шт.").strip()
         item["price_rub"] = _float(item.get("price_rub"))
         item["weight_kg"] = _float(item.get("weight_kg"))
         item["dimensions"] = parse_dimensions(item.get("size_mm"), item["weight_kg"])
@@ -437,17 +438,18 @@ def build_quote(
             line["purchase_with_delivery_total"] = line["purchase_with_delivery_unit"] * line["quantity"]
             line["client_unit"] = line["purchase_with_delivery_unit"] * (1 + markup / 100)
             line["client_line_total"] = line["client_unit"] * line["quantity"]
+            unit = line.get("unit") or "шт."
             if line["manual_load_per_trip"]:
-                line["quantity_per_trip"] = f"до {line['manual_load_per_trip']} шт. (ручной режим)"
+                line["quantity_per_trip"] = f"до {line['manual_load_per_trip']} {unit} (ручной режим)"
             else:
                 minimum_per_trip = line["quantity"] // calculation["trips"]
                 maximum_per_trip = math.ceil(line["quantity"] / calculation["trips"])
                 if minimum_per_trip == maximum_per_trip:
-                    line["quantity_per_trip"] = f"{maximum_per_trip} шт."
+                    line["quantity_per_trip"] = f"{maximum_per_trip} {unit}"
                 elif minimum_per_trip == 0:
-                    line["quantity_per_trip"] = f"до {maximum_per_trip} шт."
+                    line["quantity_per_trip"] = f"до {maximum_per_trip} {unit}"
                 else:
-                    line["quantity_per_trip"] = f"{minimum_per_trip}–{maximum_per_trip} шт."
+                    line["quantity_per_trip"] = f"{minimum_per_trip}–{maximum_per_trip} {unit}"
 
     purchase_total = sum(line["purchase_total"] for line in all_lines)
     delivery_total = sum(item["delivery_total"] for item in deliveries)
@@ -741,8 +743,8 @@ def build_proposal_document(quote, form):
         cells = products_table.add_row().cells
         values = [
             number,
-            f'{line["name"]}\n{line["size_mm"]}; {line["weight_kg"]:g} кг/шт.',
-            f'{line["quantity"]} шт.',
+            f'{line["name"]}\n{line["size_mm"]}; {line["weight_kg"]:g} кг/{line["unit"]}',
+            f'{line["quantity"]} {line["unit"]}',
             f'{line["client_unit"]:,.0f} ₽'.replace(",", " "),
             f'{line["client_line_total"]:,.0f} ₽'.replace(",", " "),
         ]
@@ -941,7 +943,7 @@ def build_catalog_proposal_document(offer, form):
                     f'{row["name"]}\n{row["group"]}',
                     dimension_note,
                     "1",
-                    f'{row["load_quantity"]} шт.\n{row["load_weight_kg"] / 1000:.2f} т',
+                    f'{row["load_quantity"]} {row["unit"]}\n{row["load_weight_kg"] / 1000:.2f} т',
                     f'{row["client_unit"]:,.0f} ₽',
                     f'{row["client_total"]:,.0f} ₽',
                 ]
@@ -1046,7 +1048,7 @@ function show(){const rows=filtered();productCount.textContent=rows.length?`${ro
 function resetSelection(clearSearch=true){selectedId='';selectedName.value='';if(clearSearch)search.value='';show()}
 supplier.addEventListener('change',()=>resetSelection());group.addEventListener('change',()=>resetSelection());search.addEventListener('input',()=>resetSelection(false));
 function renderTransport(){const suppliers=[...new Set(cart.map(item=>catalog.find(p=>p.id===item.id)?.supplier).filter(Boolean))];Object.keys(vehicleOverrides).forEach(name=>{if(!suppliers.includes(name))delete vehicleOverrides[name]});Object.keys(deliveryPriceOverrides).forEach(name=>{if(!suppliers.includes(name))delete deliveryPriceOverrides[name]});transportChoices.innerHTML=suppliers.map(name=>{const options=deliveryCatalog.filter(row=>row.supplier===name);if(!options.length)return`<div class="transport-choice"><b>${esc(name)}</b><div class="muted">Нет тарифа доставки</div></div>`;if(!options.some(row=>row.vehicle===vehicleOverrides[name]))vehicleOverrides[name]=options[0].vehicle;const manualPrice=Object.prototype.hasOwnProperty.call(deliveryPriceOverrides,name)?deliveryPriceOverrides[name]:'';return`<div class="transport-choice"><label>Транспорт: ${esc(name)}</label><select class="vehicleChoice" data-supplier="${esc(name)}">${options.map(row=>`<option value="${esc(row.vehicle)}"${row.vehicle===vehicleOverrides[name]?' selected':''}>${esc(row.vehicle)} · ${row.capacity_t} т · Москва ${Math.round(row.fixed_moscow_rub).toLocaleString('ru-RU')} ₽ · далее ${row.rate_rub_km} ₽/км</option>`).join('')}</select><label style="margin-top:10px">Стоимость одного рейса, ₽</label><input class="deliveryPrice" data-supplier="${esc(name)}" type="number" min="0" step="100" value="${manualPrice}" placeholder="Пусто = автоматический тариф"><div class="muted" style="margin-top:5px">Указанная вручную цена заменит автоматический тариф для этого производителя.</div></div>`}).join('');transportHint.style.display=suppliers.length?'none':'block';transportChoices.querySelectorAll('.vehicleChoice').forEach(el=>el.onchange=()=>{vehicleOverrides[el.dataset.supplier]=el.value;sync();scheduleRecalculate()});transportChoices.querySelectorAll('.deliveryPrice').forEach(el=>el.oninput=()=>{if(el.value==='')delete deliveryPriceOverrides[el.dataset.supplier];else deliveryPriceOverrides[el.dataset.supplier]=Math.max(0,Number(el.value)||0);sync();scheduleRecalculate()});sync()}
-function render(){body.innerHTML=cart.map((item,i)=>{const p=catalog.find(x=>x.id===item.id);const total=p.weight_kg*item.quantity;return`<tr><td><b>${esc(p.name)}</b><div class="muted">${esc(p.group)}</div></td><td>${esc(p.supplier)}</td><td>${esc(p.size_mm)}</td><td>${p.weight_kg} кг</td><td><input class="cartQty" data-index="${i}" type="number" min="1" step="1" value="${item.quantity}"></td><td><input class="manualLoad" data-id="${p.id}" type="number" min="1" step="1" value="${manualLoads[p.id]||''}" placeholder="Авто"></td><td><b class="lineWeight" data-index="${i}">${Math.round(total)} кг</b></td><td class="money">${Math.round(p.price_rub).toLocaleString('ru-RU')} ₽/шт.</td><td><button type="button" class="remove" data-index="${i}">Удалить</button></td></tr>`}).join('');empty.style.display=cart.length?'none':'block';renderTransport();document.querySelectorAll('.cartQty').forEach(el=>{el.oninput=()=>{const index=+el.dataset.index;cart[index].quantity=Math.max(1,parseInt(el.value)||1);const p=catalog.find(x=>x.id===cart[index].id),weight=document.querySelector(`.lineWeight[data-index="${index}"]`);if(weight)weight.textContent=`${Math.round(p.weight_kg*cart[index].quantity)} кг`;sync();scheduleRecalculate()};el.onblur=()=>{el.value=cart[+el.dataset.index].quantity}});document.querySelectorAll('.manualLoad').forEach(el=>el.oninput=()=>{const value=parseInt(el.value)||0;if(value>0)manualLoads[el.dataset.id]=value;else delete manualLoads[el.dataset.id];sync();scheduleRecalculate()});document.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{const removed=cart[+el.dataset.index];if(removed)delete manualLoads[removed.id];cart.splice(+el.dataset.index,1);render();scheduleRecalculate()})}
+function render(){body.innerHTML=cart.map((item,i)=>{const p=catalog.find(x=>x.id===item.id);const unit=p.unit||'шт.';const total=p.weight_kg*item.quantity;return`<tr><td><b>${esc(p.name)}</b><div class="muted">${esc(p.group)}</div></td><td>${esc(p.supplier)}</td><td>${esc(p.size_mm)}</td><td>${p.weight_kg} кг/${esc(unit)}</td><td><input class="cartQty" data-index="${i}" type="number" min="1" step="1" value="${item.quantity}"> ${esc(unit)}</td><td><input class="manualLoad" data-id="${p.id}" type="number" min="1" step="1" value="${manualLoads[p.id]||''}" placeholder="Авто"></td><td><b class="lineWeight" data-index="${i}">${Math.round(total)} кг</b></td><td class="money">${Math.round(p.price_rub).toLocaleString('ru-RU')} ₽/${esc(unit)}</td><td><button type="button" class="remove" data-index="${i}">Удалить</button></td></tr>`}).join('');empty.style.display=cart.length?'none':'block';renderTransport();document.querySelectorAll('.cartQty').forEach(el=>{el.oninput=()=>{const index=+el.dataset.index;cart[index].quantity=Math.max(1,parseInt(el.value)||1);const p=catalog.find(x=>x.id===cart[index].id),weight=document.querySelector(`.lineWeight[data-index="${index}"]`);if(weight)weight.textContent=`${Math.round(p.weight_kg*cart[index].quantity)} кг`;sync();scheduleRecalculate()};el.onblur=()=>{el.value=cart[+el.dataset.index].quantity}});document.querySelectorAll('.manualLoad').forEach(el=>el.oninput=()=>{const value=parseInt(el.value)||0;if(value>0)manualLoads[el.dataset.id]=value;else delete manualLoads[el.dataset.id];sync();scheduleRecalculate()});document.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{const removed=cart[+el.dataset.index];if(removed)delete manualLoads[removed.id];cart.splice(+el.dataset.index,1);render();scheduleRecalculate()})}
 document.getElementById('addItem').onclick=()=>{if(!selectedId){alert('Выберите точное изделие из списка ниже');return}const amount=Math.max(1,parseInt(qty.value)||1);const old=cart.find(x=>x.id===selectedId);if(old)old.quantity+=amount;else cart.push({id:selectedId,quantity:amount});qty.value=1;resetSelection();render();scheduleRecalculate()};
 quoteForm.elements.address.addEventListener('change',scheduleRecalculate);quoteForm.elements.markup.addEventListener('change',scheduleRecalculate);quoteForm.onsubmit=e=>{if(!cart.length){e.preventDefault();alert('Добавьте хотя бы одно изделие в заявку');return}sync()};show();render();
 </script></body></html>
