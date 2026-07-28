@@ -721,8 +721,14 @@ class TelegramLeadService:
         self.user.add_event_handler(self.process_event, events.NewMessage(incoming=True))
         self.bot.add_event_handler(self.bot_command, events.NewMessage(incoming=True))
         LOG.info("Telegram-парсер запущен")
-        await self.scan_history()
-        await asyncio.gather(self.user.run_until_disconnected(), self.bot.run_until_disconnected())
+        history_task = asyncio.create_task(self.scan_history(), name="telegram-history-scan")
+        try:
+            await asyncio.gather(
+                self.user.run_until_disconnected(),
+                self.bot.run_until_disconnected(),
+            )
+        finally:
+            history_task.cancel()
 
 
 class BotApiLeadService:
