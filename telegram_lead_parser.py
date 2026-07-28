@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import io
 import json
 import logging
 import os
@@ -17,10 +18,15 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 try:
     from telethon import TelegramClient, events
@@ -101,9 +107,10 @@ OFFER_PATTERNS = (
 )
 
 QUANTITY_RE = re.compile(
-    r"(?P<number>\d+(?:[.,]\d+)?)\s*"
-    r"(?P<unit>м\s*[³3]|куб(?:а|ов)?|тонн?(?:а|ы)?|т\b|шт\.?|штук(?:а|и)?|"
-    r"рейс(?:а|ов)?|машин(?:а|ы)?|мешк(?:а|ов)?|палл(?:ет|еты|ет)|пог\.?\s*м)",
+    r"(?P<number>\d+(?:[.,]\d+)?(?:\s*[-–—]\s*\d+(?:[.,]\d+)?)?)\s*"
+    r"(?P<unit>м\s*[³3]|куб(?:а|ов)?|тонн?(?:а|ы)?|тн?\.?|кг|шт\.?|штук(?:а|и)?|ед\.?|"
+    r"рейс(?:а|ов)?|машин(?:а|ы)?|мешк(?:а|ов)?|палл(?:ет|еты|ет)|поддон(?:а|ов)?|"
+    r"комплект(?:а|ов)?|пог\.?\s*м|л(?:итр(?:а|ов)?)?)",
     re.IGNORECASE,
 )
 PHONE_RE = re.compile(r"(?<!\d)(?:\+7|8)[\s()\-]*\d{3}[\s()\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}(?!\d)")
@@ -136,6 +143,12 @@ class ParsedLead:
     telegram_contacts: list[str]
     address: str
     source_link: str
+    media_type: str
+    media_name: str
+    media_mime: str
+    media_size: int
+    forwarded_from: str
+    reply_to_message_id: int | None
     message_text: str
     message_date: str
     created_at: str
@@ -231,6 +244,12 @@ def parse_message(
     sender_name: str = "",
     sender_username: str = "",
     source_link: str = "",
+    media_type: str = "",
+    media_name: str = "",
+    media_mime: str = "",
+    media_size: int = 0,
+    forwarded_from: str = "",
+    reply_to_message_id: int | None = None,
     message_date: datetime | None = None,
 ) -> ParsedLead | None:
     clean_text = re.sub(r"\r\n?", "\n", text or "").strip()
@@ -242,8 +261,6 @@ def parse_message(
     phones = unique(normalize_phone(match.group(0)) for match in PHONE_RE.finditer(clean_text))
     emails = unique(match.group(0).lower() for match in EMAIL_RE.finditer(clean_text))
     telegram_contacts = unique(match.group(0) for match in USERNAME_RE.finditer(clean_text))
-    if sender_username:
-        telegram_contacts = unique([f"@{sender_username.lstrip('@')}"] + telegram_contacts)
 
     fingerprint = hashlib.sha256(f"{chat_id}:{message_id}".encode()).hexdigest()
     now = datetime.now(timezone.utc).isoformat()
@@ -263,6 +280,12 @@ def parse_message(
         telegram_contacts=telegram_contacts,
         address=extract_address(clean_text),
         source_link=source_link,
+        media_type=media_type,
+        media_name=media_name,
+        media_mime=media_mime,
+        media_size=media_size,
+        forwarded_from=forwarded_from,
+        reply_to_message_id=reply_to_message_id,
         message_text=clean_text[:6000],
         message_date=date,
         created_at=now,
@@ -300,12 +323,35 @@ class LeadStore:
                     telegram_contacts_json TEXT NOT NULL,
                     address TEXT,
                     source_link TEXT,
+                    media_type TEXT,
+                    media_name TEXT,
+                    media_mime TEXT,
+                    media_size INTEGER NOT NULL DEFAULT 0,
+                    forwarded_from TEXT,
+                    reply_to_message_id INTEGER,
                     message_text TEXT NOT NULL,
                     message_date TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(telegram_leads)").fetchall()
+            }
+            migrations = {
+                "media_type": "TEXT",
+                "media_name": "TEXT",
+                "media_mime": "TEXT",
+                "media_size": "INTEGER NOT NULL DEFAULT 0",
+                "forwarded_from": "TEXT",
+                "reply_to_message_id": "INTEGER",
+            }
+            for column, definition in migrations.items():
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE telegram_leads ADD COLUMN {column} {definition}"
+                    )
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tg_leads_date ON telegram_leads(message_date DESC)")
             connection.execute(
                 """
@@ -335,6 +381,19 @@ class LeadStore:
     def count(self) -> int:
         with self.connect() as connection:
             return int(connection.execute("SELECT COUNT(*) FROM telegram_leads").fetchone()[0])
+
+    def delete_by_sender(self, sender_id: int) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM telegram_leads
+                WHERE sender_id=?
+                   OR message_text LIKE '🧱 Заявка #%'
+                   OR message_text LIKE 'Заявка #%'
+                """,
+                (sender_id,),
+            )
+            return int(cursor.rowcount)
 
     def recent(self, limit: int = 10, query: str = "") -> list[sqlite3.Row]:
         limit = max(1, min(limit, 30))
@@ -380,13 +439,32 @@ def row_to_text(row: sqlite3.Row, compact: bool = False) -> str:
     quantities = ", ".join(
         f'{item["value"]} {item["unit"]}' for item in json.loads(row["quantities_json"])
     ) or "не указано"
-    contacts = unique(
+    contacts_from_text = unique(
         json.loads(row["phones_json"])
         + json.loads(row["emails_json"])
         + json.loads(row["telegram_contacts_json"])
     )
+    message_date = datetime.fromisoformat(row["message_date"]).astimezone(
+        ZoneInfo("Europe/Moscow")
+    ).strftime("%d.%m.%Y %H:%M")
+    sender_name = row["sender_name"] or "Имя не указано"
+    sender_username = (row["sender_username"] or "").lstrip("@")
+    sender_id = row["sender_id"]
+    if sender_username:
+        sender = (
+            f'<a href="https://t.me/{html.escape(sender_username, quote=True)}">'
+            f'{html.escape(sender_name)}</a> (@{html.escape(sender_username)})'
+        )
+    elif sender_id:
+        sender = (
+            f'<a href="tg://user?id={int(sender_id)}">{html.escape(sender_name)}</a> '
+            f"(ID {int(sender_id)})"
+        )
+    else:
+        sender = html.escape(sender_name)
     lines = [
         f'🧱 <b>Заявка #{row["id"]}</b>',
+        f"<b>Дата заявки:</b> {message_date} МСК",
         f"<b>Товар:</b> {html.escape(products)}",
         f"<b>Объём:</b> {html.escape(quantities)}",
     ]
@@ -394,13 +472,32 @@ def row_to_text(row: sqlite3.Row, compact: bool = False) -> str:
         lines.extend(
             [
                 f'<b>Адрес:</b> {html.escape(row["address"] or "не указан")}',
-                f'<b>Контакт:</b> {html.escape(", ".join(contacts) or row["sender_name"] or "не указан")}',
+                f"<b>Автор:</b> {sender}",
+                f'<b>ID автора:</b> {html.escape(str(sender_id or "не указан"))}',
+                f'<b>Контакты из текста:</b> {html.escape(", ".join(contacts_from_text) or "не указаны")}',
                 f'<b>Чат:</b> {html.escape(row["chat_title"])}',
+                f'<b>ID чата / сообщения:</b> {row["chat_id"]} / {row["message_id"]}',
                 f'<b>Текст:</b> {html.escape(row["message_text"][:1200])}',
             ]
         )
+        if row["forwarded_from"]:
+            lines.append(f'<b>Переслано от:</b> {html.escape(row["forwarded_from"])}')
+        if row["reply_to_message_id"]:
+            lines.append(f'<b>Ответ на сообщение:</b> {row["reply_to_message_id"]}')
+        if row["media_type"]:
+            media = row["media_type"]
+            if row["media_name"]:
+                media += f' — {row["media_name"]}'
+            if row["media_mime"]:
+                media += f' ({row["media_mime"]})'
+            if row["media_size"]:
+                media += f', {row["media_size"] / 1024 / 1024:.1f} МБ'
+            lines.append(f'<b>Вложение:</b> {html.escape(media)}')
         if row["source_link"]:
-            lines.append(f'<a href="{html.escape(row["source_link"], quote=True)}">Открыть сообщение</a>')
+            lines.append(
+                f'<a href="{html.escape(row["source_link"], quote=True)}">'
+                "Открыть исходное сообщение</a>"
+            )
     return "\n".join(lines)
 
 
@@ -455,16 +552,68 @@ class TelegramLeadService:
         if chat_id.startswith("100"):
             chat_id = chat_id[3:]
             return f"https://t.me/c/{chat_id}/{event.id}"
+        return f"tg://openmessage?chat_id={chat_id}&message_id={event.id}"
+
+    @staticmethod
+    def media_metadata(event) -> tuple[str, str, str, int]:
+        file = getattr(event, "file", None)
+        media_type = ""
+        if getattr(event, "photo", None):
+            media_type = "Фото"
+        elif getattr(event, "video", None):
+            media_type = "Видео"
+        elif getattr(event, "voice", None):
+            media_type = "Голосовое сообщение"
+        elif getattr(event, "document", None):
+            media_type = "Документ"
+        elif getattr(event, "media", None):
+            media_type = type(event.media).__name__
+        return (
+            media_type,
+            getattr(file, "name", "") or "",
+            getattr(file, "mime_type", "") or "",
+            int(getattr(file, "size", 0) or 0),
+        )
+
+    @staticmethod
+    def forwarded_from(event) -> str:
+        forwarded = getattr(event, "fwd_from", None)
+        if not forwarded:
+            return ""
+        if getattr(forwarded, "from_name", None):
+            return str(forwarded.from_name)
+        if getattr(forwarded, "from_id", None):
+            return str(forwarded.from_id)
         return ""
 
+    async def send_media(self, owner_id: int, event, lead_id: int) -> None:
+        media_type, media_name, media_mime, media_size = self.media_metadata(event)
+        if not media_type or media_size > 15 * 1024 * 1024:
+            return
+        buffer = io.BytesIO()
+        buffer.name = media_name or (
+            "photo.jpg" if media_type == "Фото" else f"attachment-{lead_id}"
+        )
+        target = getattr(event, "message", event)
+        await self.user.download_media(target, file=buffer)
+        buffer.seek(0)
+        await self.bot.send_file(
+            owner_id,
+            buffer,
+            caption=f"Вложение к заявке #{lead_id}: {media_type}",
+        )
+
     async def process_event(self, event, notify: bool = True) -> int | None:
-        if not event.raw_text:
+        if getattr(event, "is_private", False) or not event.raw_text:
             return None
         chat = await event.get_chat()
         username = getattr(chat, "username", "") or ""
         if not self.chat_allowed(event.chat_id, username):
             return None
         sender = await event.get_sender()
+        if getattr(sender, "bot", False):
+            return None
+        media_type, media_name, media_mime, media_size = self.media_metadata(event)
         lead = parse_message(
             text=event.raw_text,
             chat_id=event.chat_id,
@@ -474,6 +623,12 @@ class TelegramLeadService:
             sender_name=get_display_name(sender) if sender else "",
             sender_username=getattr(sender, "username", "") or "",
             source_link=await self.source_link(event, username),
+            media_type=media_type,
+            media_name=media_name,
+            media_mime=media_mime,
+            media_size=media_size,
+            forwarded_from=self.forwarded_from(event),
+            reply_to_message_id=getattr(event, "reply_to_msg_id", None),
             message_date=event.date,
         )
         if not lead:
@@ -483,7 +638,13 @@ class TelegramLeadService:
             row = self.store.by_id(lead_id)
             for owner_id in self.owner_ids:
                 try:
-                    await self.bot.send_message(owner_id, row_to_text(row), parse_mode="html", link_preview=False)
+                    await self.bot.send_message(
+                        owner_id,
+                        row_to_text(row),
+                        parse_mode="html",
+                        link_preview=False,
+                    )
+                    await self.send_media(owner_id, event, lead_id)
                 except Exception:
                     LOG.exception("Не удалось отправить заявку владельцу %s", owner_id)
         return lead_id
@@ -553,6 +714,10 @@ class TelegramLeadService:
         self.validate()
         await self.user.start()
         await self.bot.start(bot_token=self.bot_token)
+        bot_me = await self.bot.get_me()
+        removed = self.store.delete_by_sender(int(bot_me.id))
+        if removed:
+            LOG.info("Удалено ошибочных заявок от бота: %s", removed)
         self.user.add_event_handler(self.process_event, events.NewMessage(incoming=True))
         self.bot.add_event_handler(self.bot_command, events.NewMessage(incoming=True))
         LOG.info("Telegram-парсер запущен")
@@ -560,12 +725,195 @@ class TelegramLeadService:
         await asyncio.gather(self.user.run_until_disconnected(), self.bot.run_until_disconnected())
 
 
+class BotApiLeadService:
+    """Bot-only fallback that works without a Telegram API application.
+
+    It receives new messages from groups where the bot is a member. Telegram
+    privacy mode must be disabled in BotFather for ordinary group messages.
+    """
+
+    def __init__(self):
+        self.bot_token = os.getenv("TG_BOT_TOKEN", "").strip()
+        self.owner_ids = {int(value) for value in csv_set("TG_OWNER_IDS") if value.lstrip("-").isdigit()}
+        self.claim_token = os.getenv("TG_OWNER_CLAIM_TOKEN", "").strip()
+        self.allowlist = csv_set("TG_CHAT_ALLOWLIST")
+        self.blocklist = csv_set("TG_CHAT_BLOCKLIST")
+        self.store = LeadStore(os.getenv("TG_DB_PATH", "telegram_leads.db"))
+        stored_owner_ids = self.store.get_config("owner_ids")
+        self.owner_ids.update(
+            int(value) for value in stored_owner_ids.split(",") if value.strip().lstrip("-").isdigit()
+        )
+        self.offset = 0
+
+    def validate(self) -> None:
+        missing = []
+        if not self.bot_token:
+            missing.append("TG_BOT_TOKEN")
+        if not self.owner_ids and not self.claim_token:
+            missing.append("TG_OWNER_IDS или TG_OWNER_CLAIM_TOKEN")
+        if missing:
+            raise RuntimeError("Не заданы переменные окружения: " + ", ".join(missing))
+
+    def api(self, method: str, payload: dict | None = None, timeout: int = 35) -> dict:
+        data = urllib.parse.urlencode(payload or {}).encode("utf-8")
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{self.bot_token}/{method}",
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if not result.get("ok"):
+            raise RuntimeError(f"Bot API {method}: {result.get('description', 'unknown error')}")
+        return result
+
+    def send(self, chat_id: int, text: str) -> None:
+        self.api(
+            "sendMessage",
+            {
+                "chat_id": str(chat_id),
+                "text": text[:4000],
+                "parse_mode": "HTML",
+                "disable_web_page_preview": "true",
+            },
+        )
+
+    def chat_allowed(self, chat_id: int, username: str = "") -> bool:
+        keys = {str(chat_id).lower(), username.lower().lstrip("@")}
+        if keys & self.blocklist:
+            return False
+        return not self.allowlist or bool(keys & self.allowlist)
+
+    @staticmethod
+    def display_name(user: dict) -> str:
+        return " ".join(part for part in (user.get("first_name", ""), user.get("last_name", "")) if part).strip()
+
+    def source_link(self, message: dict, username: str) -> str:
+        if username:
+            return f"https://t.me/{username}/{message['message_id']}"
+        chat_id = str(abs(int(message["chat"]["id"])))
+        if chat_id.startswith("100"):
+            return f"https://t.me/c/{chat_id[3:]}/{message['message_id']}"
+        return ""
+
+    def handle_command(self, message: dict) -> bool:
+        text = (message.get("text") or "").strip()
+        if not text.startswith("/"):
+            return False
+        command, _, argument = text.partition(" ")
+        command = command.lower().split("@")[0]
+        sender_id = int(message.get("from", {}).get("id", 0))
+        chat_id = int(message["chat"]["id"])
+        if sender_id not in self.owner_ids:
+            valid_claim = (
+                command == "/claim"
+                and self.claim_token
+                and secrets.compare_digest(argument.strip(), self.claim_token)
+            )
+            if not valid_claim:
+                return True
+            self.owner_ids.add(sender_id)
+            self.store.set_config("owner_ids", ",".join(str(value) for value in sorted(self.owner_ids)))
+            self.send(chat_id, "✅ Аккаунт владельца привязан. Удалите сообщение с кодом.")
+            return True
+        if command in {"/start", "/help"}:
+            response = (
+                "Парсер строительных заявок работает.\n\n"
+                "/status — состояние базы\n"
+                "/last 10 — последние заявки\n"
+                "/lead 123 — полная заявка\n"
+                "/search песок — поиск по базе"
+            )
+        elif command == "/status":
+            response = f"✅ Парсер работает\nЗаявок в базе: <b>{self.store.count()}</b>"
+        elif command == "/last":
+            limit = int(argument) if argument.isdigit() else 10
+            rows = self.store.recent(limit=limit)
+            response = "\n\n".join(row_to_text(row, compact=True) for row in rows) or "Заявок пока нет."
+        elif command == "/lead" and argument.isdigit():
+            row = self.store.by_id(int(argument))
+            response = row_to_text(row) if row else "Заявка не найдена."
+        elif command == "/search" and argument.strip():
+            rows = self.store.recent(limit=15, query=argument.strip())
+            response = "\n\n".join(row_to_text(row, compact=True) for row in rows) or "Совпадений нет."
+        else:
+            response = "Неизвестная команда. Используйте /help."
+        self.send(chat_id, response)
+        return True
+
+    def handle_message(self, message: dict) -> None:
+        if self.handle_command(message):
+            return
+        chat = message.get("chat", {})
+        if chat.get("type") not in {"group", "supergroup", "channel"}:
+            return
+        chat_id = int(chat.get("id", 0))
+        username = chat.get("username", "") or ""
+        if not self.chat_allowed(chat_id, username):
+            return
+        sender = message.get("from", {}) or {}
+        text = message.get("text") or message.get("caption") or ""
+        lead = parse_message(
+            text=text,
+            chat_id=chat_id,
+            message_id=int(message.get("message_id", 0)),
+            chat_title=chat.get("title") or username or str(chat_id),
+            sender_id=sender.get("id"),
+            sender_name=self.display_name(sender),
+            sender_username=sender.get("username", "") or "",
+            source_link=self.source_link(message, username),
+            message_date=datetime.fromtimestamp(message.get("date", time.time()), tz=timezone.utc),
+        )
+        if not lead:
+            return
+        lead_id = self.store.add(lead)
+        if not lead_id:
+            return
+        row = self.store.by_id(lead_id)
+        for owner_id in self.owner_ids:
+            try:
+                self.send(owner_id, row_to_text(row))
+            except Exception:
+                LOG.exception("Не удалось отправить заявку владельцу %s", owner_id)
+
+    def run(self) -> None:
+        self.validate()
+        self.api("deleteWebhook", {"drop_pending_updates": "false"})
+        LOG.info("Telegram Bot API parser started")
+        while True:
+            try:
+                updates = self.api(
+                    "getUpdates",
+                    {
+                        "offset": str(self.offset),
+                        "timeout": "25",
+                        "allowed_updates": json.dumps(["message", "channel_post"]),
+                    },
+                    timeout=35,
+                ).get("result", [])
+                for update in updates:
+                    self.offset = max(self.offset, int(update["update_id"]) + 1)
+                    message = update.get("message") or update.get("channel_post")
+                    if message:
+                        self.handle_message(message)
+            except (urllib.error.URLError, TimeoutError):
+                LOG.warning("Telegram Bot API unavailable; retrying")
+                time.sleep(3)
+            except Exception:
+                LOG.exception("Bot API parser loop failed")
+                time.sleep(3)
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    asyncio.run(TelegramLeadService().run())
+    mode = os.getenv("TG_MODE", "user").strip().lower()
+    if mode == "bot":
+        BotApiLeadService().run()
+    else:
+        asyncio.run(TelegramLeadService().run())
 
 
 _background_thread: threading.Thread | None = None
