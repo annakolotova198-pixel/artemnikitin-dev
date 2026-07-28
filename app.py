@@ -765,18 +765,45 @@ def home():
                     }
                 });
 
+                // Если запрос совпадает с названием раздела, сначала показываем
+                // все товары именно этого раздела. Совпадения внутри длинных
+                // описаний других товаров остаются ниже как дополнительные.
+                const primaryFamilies = new Set(
+                    materialSuggestions
+                        .filter(function(item) {
+                            return item.kind === "any"
+                                && item.family !== "all"
+                                && (
+                                    item.family === normalized
+                                    || item.search.startsWith(normalized)
+                                    || normalized.startsWith(item.search)
+                                );
+                        })
+                        .map(function(item) {
+                            return item.family;
+                        })
+                );
+
                 let anyOptions = materialSuggestions.filter(function(item) {
                     return item.kind === "any" && matchedFamilies.has(item.family);
                 });
                 anyOptions.sort(function(a, b) {
+                    const aPrimary = primaryFamilies.has(a.family) ? 0 : 1;
+                    const bPrimary = primaryFamilies.has(b.family) ? 0 : 1;
                     const aStarts = a.search.startsWith(normalized) ? 0 : 1;
                     const bStarts = b.search.startsWith(normalized) ? 0 : 1;
-                    return aStarts - bStarts || a.label.localeCompare(b.label, "ru");
+                    return aPrimary - bPrimary
+                        || aStarts - bStarts
+                        || a.label.localeCompare(b.label, "ru");
                 });
                 exactProducts.sort(function(a, b) {
+                    const aPrimary = primaryFamilies.has(a.family) ? 0 : 1;
+                    const bPrimary = primaryFamilies.has(b.family) ? 0 : 1;
                     const aStarts = a.search.startsWith(normalized) ? 0 : 1;
                     const bStarts = b.search.startsWith(normalized) ? 0 : 1;
-                    return aStarts - bStarts || a.label.localeCompare(b.label, "ru");
+                    return aPrimary - bPrimary
+                        || aStarts - bStarts
+                        || a.label.localeCompare(b.label, "ru");
                 });
 
                 return anyOptions.concat(exactProducts).slice(0, 100);
