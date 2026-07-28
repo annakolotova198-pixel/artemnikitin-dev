@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass, asdict
@@ -306,6 +307,14 @@ class LeadStore:
                 """
             )
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tg_leads_date ON telegram_leads(message_date DESC)")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_bot_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
 
     def add(self, lead: ParsedLead) -> int | None:
         data = asdict(lead)
@@ -347,6 +356,24 @@ class LeadStore:
         with self.connect() as connection:
             return connection.execute("SELECT * FROM telegram_leads WHERE id=?", (lead_id,)).fetchone()
 
+    def get_config(self, key: str, default: str = "") -> str:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM telegram_bot_config WHERE key=?",
+                (key,),
+            ).fetchone()
+            return str(row["value"]) if row else default
+
+    def set_config(self, key: str, value: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO telegram_bot_config (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (key, value),
+            )
+
 
 def row_to_text(row: sqlite3.Row, compact: bool = False) -> str:
     products = ", ".join(json.loads(row["products_json"])) or "не определено"
@@ -386,11 +413,16 @@ class TelegramLeadService:
         self.user_session = os.getenv("TG_USER_SESSION", "").strip()
         self.bot_token = os.getenv("TG_BOT_TOKEN", "").strip()
         self.owner_ids = {int(value) for value in csv_set("TG_OWNER_IDS") if value.lstrip("-").isdigit()}
+        self.claim_token = os.getenv("TG_OWNER_CLAIM_TOKEN", "").strip()
         self.allowlist = csv_set("TG_CHAT_ALLOWLIST")
         self.blocklist = csv_set("TG_CHAT_BLOCKLIST")
         self.history_limit = env_int("TG_HISTORY_LIMIT", 100)
         self.backfill = os.getenv("TG_BACKFILL", "1").strip().lower() not in {"0", "false", "no"}
         self.store = LeadStore(os.getenv("TG_DB_PATH", "telegram_leads.db"))
+        stored_owner_ids = self.store.get_config("owner_ids")
+        self.owner_ids.update(
+            int(value) for value in stored_owner_ids.split(",") if value.strip().lstrip("-").isdigit()
+        )
         self.user = TelegramClient(StringSession(self.user_session), self.api_id, self.api_hash)
         self.bot = TelegramClient("telegram_lead_bot", self.api_id, self.api_hash)
 
@@ -402,10 +434,11 @@ class TelegramLeadService:
                 ("TG_API_HASH", self.api_hash),
                 ("TG_USER_SESSION", self.user_session),
                 ("TG_BOT_TOKEN", self.bot_token),
-                ("TG_OWNER_IDS", self.owner_ids),
             )
             if not value
         ]
+        if not self.owner_ids and not self.claim_token:
+            missing.append("TG_OWNER_IDS или TG_OWNER_CLAIM_TOKEN")
         if missing:
             raise RuntimeError("Не заданы переменные окружения: " + ", ".join(missing))
 
@@ -474,11 +507,24 @@ class TelegramLeadService:
         LOG.info("История обработана: %s чатов, всего заявок %s", scanned_chats, self.store.count())
 
     async def bot_command(self, event) -> None:
-        if event.sender_id not in self.owner_ids:
-            return
         text = (event.raw_text or "").strip()
         command, _, argument = text.partition(" ")
         command = command.lower().split("@")[0]
+        if event.sender_id not in self.owner_ids:
+            valid_claim = (
+                command == "/claim"
+                and self.claim_token
+                and secrets.compare_digest(argument.strip(), self.claim_token)
+            )
+            if not valid_claim:
+                return
+            self.owner_ids.add(int(event.sender_id))
+            self.store.set_config("owner_ids", ",".join(str(value) for value in sorted(self.owner_ids)))
+            await event.respond(
+                "✅ Аккаунт владельца привязан. Код больше не показывайте и удалите сообщение с ним.",
+                parse_mode="html",
+            )
+            return
         if command in {"/start", "/help"}:
             response = (
                 "Парсер строительных заявок работает.\n\n"
