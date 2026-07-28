@@ -118,7 +118,8 @@ def normalize_material_search(value):
 
 def material_family(material_name):
     """Определяет товарное семейство для варианта «любой»."""
-    normalized = normalize_material_search(material_name)
+    primary_name = re.split(r"[\(\[,;/]", str(material_name or ""), maxsplit=1)[0]
+    primary_normalized = normalize_material_search(primary_name)
     known_families = (
         (("керамзит",), "Керамзит"),
         (("песок", "пескогрунт"), "Песок"),
@@ -137,7 +138,7 @@ def material_family(material_name):
         (("гравий",), "Гравий"),
     )
     for aliases, family in known_families:
-        if any(alias in normalized for alias in aliases):
+        if any(alias in primary_normalized for alias in aliases):
             return family
 
     # Для новых типов товара автоматически используем начало наименования.
