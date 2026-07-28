@@ -29,14 +29,16 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 try:
-    from telethon import TelegramClient, events
+    from telethon import TelegramClient, events, functions
     from telethon.sessions import StringSession
-    from telethon.utils import get_display_name
+    from telethon.utils import get_display_name, get_peer_id
 except ImportError:  # Allows the extraction logic to be tested before dependencies are installed.
     TelegramClient = None
     events = None
+    functions = None
     StringSession = None
     get_display_name = None
+    get_peer_id = None
 
 
 LOG = logging.getLogger("telegram-leads")
@@ -125,6 +127,21 @@ LOCATION_WORDS_RE = re.compile(
     r"проспект|пр-т|проезд|деревня|д\.|пос[её]лок|п\.|город|г\.)\b",
     re.IGNORECASE,
 )
+TELEGRAM_CHAT_LINK_RE = re.compile(
+    r"(?:(?:https?://)?(?:t\.me|telegram\.me)/[^\s<>\[\]()\"']+)",
+    re.IGNORECASE,
+)
+NON_CHAT_TELEGRAM_PATHS = {
+    "addlist",
+    "addstickers",
+    "blog",
+    "faq",
+    "iv",
+    "login",
+    "proxy",
+    "share",
+    "socks",
+}
 
 
 @dataclass
@@ -172,6 +189,40 @@ def normalize_phone(value: str) -> str:
 
 def unique(values: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
+
+
+def extract_telegram_chat_targets(
+    text: str, extra_urls: Iterable[str] = ()
+) -> tuple[set[str], set[str]]:
+    """Return public usernames and private invite hashes from Telegram links."""
+    usernames: set[str] = set()
+    invite_hashes: set[str] = set()
+    raw_links = list(TELEGRAM_CHAT_LINK_RE.findall(text or "")) + list(extra_urls)
+    for raw_link in raw_links:
+        link = str(raw_link or "").strip().rstrip(".,;:!?)]}>")
+        if not link:
+            continue
+        if not re.match(r"^https?://", link, re.IGNORECASE):
+            link = "https://" + link
+        parsed = urllib.parse.urlparse(link)
+        if parsed.netloc.lower() not in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
+            continue
+        path = urllib.parse.unquote(parsed.path).strip("/")
+        if not path:
+            continue
+        if path.startswith("+"):
+            invite_hashes.add(path[1:].split("/", 1)[0])
+            continue
+        if path.lower().startswith("joinchat/"):
+            invite_hashes.add(path.split("/", 1)[1].split("/", 1)[0])
+            continue
+        username = path.split("/", 1)[0].lstrip("@").lower()
+        if (
+            username not in NON_CHAT_TELEGRAM_PATHS
+            and re.fullmatch(r"[a-z0-9_]{5,32}", username, re.IGNORECASE)
+        ):
+            usernames.add(username)
+    return usernames, invite_hashes
 
 
 def extract_products(text: str) -> list[str]:
@@ -238,6 +289,19 @@ def is_probable_request(text: str, products: list[str], quantities: list[dict[st
     request_score = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in REQUEST_PATTERNS)
     offer_score = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in OFFER_PATTERNS)
     if offer_score and not request_score:
+        return False
+    if (
+        len(text) > 1000
+        and not quantities
+        and not PHONE_RE.search(text)
+        and not EMAIL_RE.search(text)
+        and not USERNAME_RE.search(text)
+        and not re.search(
+            r"\b(?:адрес|доставк\w*|объект|обьект|цена|стоимость|смета|закупк\w*)\b",
+            text,
+            re.IGNORECASE,
+        )
+    ):
         return False
     return request_score > 0 or bool(quantities)
 
@@ -403,6 +467,19 @@ class LeadStore:
             )
             return int(cursor.rowcount)
 
+    def retain_chat_ids(self, chat_ids: set[int]) -> int:
+        """Remove rows from chats that are not in the current approved index."""
+        with self.connect() as connection:
+            if not chat_ids:
+                cursor = connection.execute("DELETE FROM telegram_leads")
+            else:
+                placeholders = ",".join("?" for _ in chat_ids)
+                cursor = connection.execute(
+                    f"DELETE FROM telegram_leads WHERE chat_id NOT IN ({placeholders})",
+                    tuple(sorted(chat_ids)),
+                )
+            return int(cursor.rowcount)
+
     def recent(self, limit: int = 10, query: str = "") -> list[sqlite3.Row]:
         limit = max(1, min(limit, 30))
         with self.connect() as connection:
@@ -531,6 +608,10 @@ class TelegramLeadService:
         self.claim_token = os.getenv("TG_OWNER_CLAIM_TOKEN", "").strip()
         self.allowlist = csv_set("TG_CHAT_ALLOWLIST")
         self.blocklist = csv_set("TG_CHAT_BLOCKLIST")
+        self.index_chat_name = os.getenv("TG_INDEX_CHAT_NAME", "Бизнес Гид").strip()
+        self.index_history_limit = env_int("TG_INDEX_HISTORY_LIMIT", 3000)
+        self.indexed_chat_ids: set[int] = set()
+        self.index_loaded = False
         self.history_limit = env_int("TG_HISTORY_LIMIT", 100)
         self.backfill = os.getenv("TG_BACKFILL", "1").strip().lower() not in {"0", "false", "no"}
         self.store = LeadStore(os.getenv("TG_DB_PATH", "telegram_leads.db"))
@@ -561,7 +642,104 @@ class TelegramLeadService:
         keys = {str(chat_id).lower(), username.lower().lstrip("@")}
         if keys & self.blocklist:
             return False
-        return not self.allowlist or bool(keys & self.allowlist)
+        if self.allowlist and not (keys & self.allowlist):
+            return False
+        if self.index_chat_name:
+            return self.index_loaded and int(chat_id) in self.indexed_chat_ids
+        return True
+
+    @staticmethod
+    def message_urls(message) -> list[str]:
+        urls: list[str] = []
+        for entity in getattr(message, "entities", None) or []:
+            url = getattr(entity, "url", None)
+            if url:
+                urls.append(str(url))
+        webpage = getattr(getattr(message, "media", None), "webpage", None)
+        if getattr(webpage, "url", None):
+            urls.append(str(webpage.url))
+        for row in getattr(message, "buttons", None) or []:
+            for button in row:
+                if getattr(button, "url", None):
+                    urls.append(str(button.url))
+        return urls
+
+    async def load_indexed_chats(self) -> None:
+        """Build a fail-closed chat allowlist from links sent by «Бизнес Гид»."""
+        self.indexed_chat_ids.clear()
+        if not self.index_chat_name:
+            self.index_loaded = True
+            return
+
+        dialogs = [dialog async for dialog in self.user.iter_dialogs()]
+        wanted = re.sub(r"\s+", " ", self.index_chat_name.casefold()).strip()
+        exact = [
+            dialog
+            for dialog in dialogs
+            if re.sub(r"\s+", " ", (dialog.name or "").casefold()).strip() == wanted
+        ]
+        candidates = exact or [
+            dialog
+            for dialog in dialogs
+            if wanted in re.sub(r"\s+", " ", (dialog.name or "").casefold()).strip()
+        ]
+        if not candidates:
+            self.index_loaded = True
+            removed = self.store.retain_chat_ids(set())
+            LOG.error(
+                "Переписка-индекс «%s» не найдена; все чаты заблокированы, "
+                "удалено заявок %s",
+                self.index_chat_name,
+                removed,
+            )
+            return
+
+        index_dialog = candidates[0]
+        public_usernames: set[str] = set()
+        invite_hashes: set[str] = set()
+        async for message in self.user.iter_messages(
+            index_dialog.entity, limit=self.index_history_limit
+        ):
+            usernames, invites = extract_telegram_chat_targets(
+                message.message or "", self.message_urls(message)
+            )
+            public_usernames.update(usernames)
+            invite_hashes.update(invites)
+
+        group_dialogs = [
+            dialog for dialog in dialogs if dialog.is_group or dialog.is_channel
+        ]
+        for dialog in group_dialogs:
+            username = (getattr(dialog.entity, "username", "") or "").lower()
+            if username and username in public_usernames:
+                self.indexed_chat_ids.add(int(dialog.id))
+
+        for invite_hash in invite_hashes:
+            try:
+                invite = await self.user(
+                    functions.messages.CheckChatInviteRequest(hash=invite_hash)
+                )
+                chat = getattr(invite, "chat", None)
+                if chat is not None:
+                    self.indexed_chat_ids.add(int(get_peer_id(chat)))
+            except Exception as exc:
+                LOG.warning(
+                    "Не удалось сопоставить приватную ссылку из «%s»: %s",
+                    self.index_chat_name,
+                    type(exc).__name__,
+                )
+
+        self.index_loaded = True
+        removed = self.store.retain_chat_ids(self.indexed_chat_ids)
+        LOG.info(
+            "Индекс «%s»: ссылок %s, приватных приглашений %s, разрешено чатов %s, "
+            "удалено посторонних заявок %s",
+            self.index_chat_name,
+            len(public_usernames),
+            len(invite_hashes),
+            len(self.indexed_chat_ids),
+            removed,
+        )
 
     async def source_link(self, event, username: str) -> str:
         if username:
@@ -746,7 +924,16 @@ class TelegramLeadService:
                 "/search песок — поиск по товару, адресу или тексту"
             )
         elif command == "/status":
-            response = f"✅ Парсер работает\nЗаявок в базе: <b>{self.store.count()}</b>"
+            index_status = (
+                f'Чатов из «{html.escape(self.index_chat_name)}»: '
+                f"<b>{len(self.indexed_chat_ids)}</b>"
+                if self.index_chat_name
+                else "Индекс чатов отключён"
+            )
+            response = (
+                f"✅ Парсер работает\n{index_status}\n"
+                f"Заявок в базе: <b>{self.store.count()}</b>"
+            )
         elif command == "/last":
             limit = min(max(int(argument), 1), 20) if argument.isdigit() else 10
             rows = self.store.recent(limit=limit)
@@ -773,6 +960,7 @@ class TelegramLeadService:
     async def run(self) -> None:
         self.validate()
         await self.user.start()
+        await self.load_indexed_chats()
         await self.bot.start(bot_token=self.bot_token)
         bot_me = await self.bot.get_me()
         removed = self.store.delete_by_sender(int(bot_me.id))
