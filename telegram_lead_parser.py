@@ -670,6 +670,12 @@ class TelegramLeadService:
         """Build a fail-closed chat allowlist from links sent by «Бизнес Гид»."""
         self.indexed_chat_ids.clear()
         self.indexed_entities.clear()
+        self.index_loaded = False
+        removed_initial = self.store.retain_chat_ids(set())
+        if removed_initial:
+            LOG.info(
+                "Перед индексацией удалено старых заявок: %s", removed_initial
+            )
         if not self.index_chat_name:
             self.index_loaded = True
             return
@@ -930,6 +936,8 @@ class TelegramLeadService:
         LOG.info("История обработана: %s чатов, всего заявок %s", scanned_chats, self.store.count())
 
     async def poll_indexed_history(self) -> None:
+        while not self.index_loaded:
+            await asyncio.sleep(2)
         while True:
             await self.scan_history()
             await asyncio.sleep(self.index_poll_seconds)
@@ -962,12 +970,18 @@ class TelegramLeadService:
                 "/search песок — поиск по товару, адресу или тексту"
             )
         elif command == "/status":
-            index_status = (
-                f'Чатов из «{html.escape(self.index_chat_name)}»: '
-                f"<b>{len(self.indexed_chat_ids)}</b>"
-                if self.index_chat_name
-                else "Индекс чатов отключён"
-            )
+            if self.index_chat_name and not self.index_loaded:
+                index_status = (
+                    f'⏳ Индексация ссылок из «{html.escape(self.index_chat_name)}»; '
+                    f"уже найдено чатов: <b>{len(self.indexed_chat_ids)}</b>"
+                )
+            elif self.index_chat_name:
+                index_status = (
+                    f'Чатов из «{html.escape(self.index_chat_name)}»: '
+                    f"<b>{len(self.indexed_chat_ids)}</b>"
+                )
+            else:
+                index_status = "Индекс чатов отключён"
             response = (
                 f"✅ Парсер работает\n{index_status}\n"
                 f"Заявок в базе: <b>{self.store.count()}</b>"
@@ -998,7 +1012,6 @@ class TelegramLeadService:
     async def run(self) -> None:
         self.validate()
         await self.user.start()
-        await self.load_indexed_chats()
         await self.bot.start(bot_token=self.bot_token)
         bot_me = await self.bot.get_me()
         removed = self.store.delete_by_sender(int(bot_me.id))
@@ -1009,6 +1022,9 @@ class TelegramLeadService:
         self.user.add_event_handler(self.process_event, events.NewMessage(incoming=True))
         self.bot.add_event_handler(self.bot_command, events.NewMessage(incoming=True))
         LOG.info("Telegram-парсер запущен")
+        index_task = asyncio.create_task(
+            self.load_indexed_chats(), name="telegram-business-guide-index"
+        )
         history_task = asyncio.create_task(
             self.poll_indexed_history(), name="telegram-indexed-history-scan"
         )
@@ -1018,6 +1034,7 @@ class TelegramLeadService:
                 self.bot.run_until_disconnected(),
             )
         finally:
+            index_task.cancel()
             history_task.cancel()
 
 
