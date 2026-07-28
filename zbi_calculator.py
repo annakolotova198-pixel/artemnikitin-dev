@@ -1097,7 +1097,7 @@ def calculator():
                 if not quote["deliveries"]:
                     error = "Не удалось подобрать транспорт ни для одного производителя."
     catalog_for_js = [{
-        key: item[key] for key in ("id", "supplier", "group", "name", "size_mm", "weight_kg", "price_rub")
+        key: item[key] for key in ("id", "supplier", "group", "name", "unit", "size_mm", "weight_kg", "price_rub")
     } for item in products]
     delivery_for_js = [{
         key: item[key] for key in ("supplier", "vehicle", "capacity_t", "fixed_moscow_rub", "rate_rub_km")
