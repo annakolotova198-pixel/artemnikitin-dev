@@ -753,7 +753,7 @@ def home():
                 }
 
                 const tokens = normalized.split(" ").filter(Boolean);
-                const exactProducts = materialSuggestions.filter(function(item) {
+                let exactProducts = materialSuggestions.filter(function(item) {
                     return item.kind === "product" && materialMatches(item.search, tokens);
                 });
                 const matchedFamilies = new Set(exactProducts.map(function(item) {
@@ -785,8 +785,16 @@ def home():
                         })
                 );
 
+                if (primaryFamilies.size) {
+                    exactProducts = exactProducts.filter(function(item) {
+                        return primaryFamilies.has(item.family);
+                    });
+                }
+
                 let anyOptions = materialSuggestions.filter(function(item) {
-                    return item.kind === "any" && matchedFamilies.has(item.family);
+                    return item.kind === "any"
+                        && matchedFamilies.has(item.family)
+                        && (!primaryFamilies.size || primaryFamilies.has(item.family));
                 });
                 anyOptions.sort(function(a, b) {
                     const aPrimary = primaryFamilies.has(a.family) ? 0 : 1;
