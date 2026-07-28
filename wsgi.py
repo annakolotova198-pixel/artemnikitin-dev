@@ -48,3 +48,12 @@ def add_zbi_navigation(response):
             )
             response.set_data(html.replace("</body>", link + "</body>"))
     return response
+
+
+# Optional Telegram construction lead parser.
+if os.getenv("TG_PARSER_ENABLED", "0").strip().lower() in {"1", "true", "yes"}:
+    if os.getenv("TG_MODE", "user").strip().lower() == "bot":
+        from telegram_bot_api import start_background_parser as start_telegram_parser
+    else:
+        from telegram_lead_parser import start_background_parser as start_telegram_parser
+    start_telegram_parser()
