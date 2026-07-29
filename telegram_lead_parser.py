@@ -1337,7 +1337,7 @@ class TelegramLeadService:
             peer_ids.add(peer_id)
         if folder_peers:
             await self.user(
-                functions.messages.EditPeerFoldersRequest(
+                functions.folders.EditPeerFoldersRequest(
                     folder_peers=folder_peers
                 )
             )
