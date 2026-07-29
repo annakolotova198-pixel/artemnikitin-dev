@@ -1081,6 +1081,7 @@ class TelegramLeadService:
         self.index_loaded = False
         self.index_poll_seconds = max(env_int("TG_INDEX_POLL_SECONDS", 300), 60)
         self.join_interval_seconds = max(env_int("TG_JOIN_INTERVAL_SECONDS", 60), 60)
+        self.organize_interval_seconds = max(env_int("TG_ORGANIZE_INTERVAL_SECONDS", 2), 1)
         self.index_folder_name = os.getenv("TG_INDEX_FOLDER_NAME", "Бизнес Гид").strip()
         self.auto_join = os.getenv("TG_AUTO_JOIN_INDEXED_CHATS", "1").strip().lower() not in {
             "0",
@@ -1335,6 +1336,8 @@ class TelegramLeadService:
         if entity is None:
             entity = await self.user.get_entity(username)
         peer_id = int(get_peer_id(entity))
+        if peer_id in self.managed_chat_ids:
+            return peer_id
         if peer_id not in self.joined_dialog_ids:
             await self.user(functions.channels.JoinChannelRequest(channel=entity))
             self.joined_dialog_ids.add(peer_id)
@@ -1359,8 +1362,50 @@ class TelegramLeadService:
             if entity is None:
                 raise
         peer_id = int(get_peer_id(entity))
+        if peer_id in self.managed_chat_ids:
+            return peer_id
         self.joined_dialog_ids.add(peer_id)
         return await self.mute_archive_and_folder(entity)
+
+    async def organize_existing_indexed_chats(self) -> None:
+        """Immediately mute/archive chats that are already joined and indexed.
+
+        Joining new chats remains rate-limited separately. Moving already joined
+        chats into the archive is a local account organization operation and
+        should not wait behind the multi-hour join queue.
+        """
+        while not self.index_loaded:
+            await asyncio.sleep(2)
+        organized = 0
+        for peer_id, entity in list(self.indexed_entities.items()):
+            if peer_id in self.managed_chat_ids:
+                continue
+            try:
+                await self.mute_archive_and_folder(entity)
+                organized += 1
+            except Exception as exc:
+                flood_seconds = int(getattr(exc, "seconds", 0) or 0)
+                if flood_seconds:
+                    LOG.warning(
+                        "Telegram временно ограничил организацию чатов на %s сек.; "
+                        "ожидаем без обхода ограничения",
+                        flood_seconds,
+                    )
+                    await asyncio.sleep(flood_seconds + 1)
+                    try:
+                        await self.mute_archive_and_folder(entity)
+                        organized += 1
+                    except Exception:
+                        LOG.exception("Не удалось повторно убрать чат %s в архив", peer_id)
+                else:
+                    LOG.exception("Не удалось убрать чат %s в архив", peer_id)
+            await asyncio.sleep(self.organize_interval_seconds)
+        LOG.info(
+            "Существующие чаты из «%s» организованы: %s; архивировано всего: %s",
+            self.index_chat_name,
+            organized,
+            len(self.managed_chat_ids),
+        )
 
     async def manage_indexed_memberships(self) -> None:
         """Join at most one indexed chat per minute and organize it."""
@@ -1699,6 +1744,9 @@ class TelegramLeadService:
         membership_task = asyncio.create_task(
             self.manage_indexed_memberships(), name="telegram-indexed-membership-manager"
         )
+        organize_task = asyncio.create_task(
+            self.organize_existing_indexed_chats(), name="telegram-indexed-chat-organizer"
+        )
         sheet_task = asyncio.create_task(
             self.sync_provider_sheets(), name="telegram-provider-sheet-sync"
         )
@@ -1711,6 +1759,7 @@ class TelegramLeadService:
             index_task.cancel()
             history_task.cancel()
             membership_task.cancel()
+            organize_task.cancel()
             sheet_task.cancel()
 
 
