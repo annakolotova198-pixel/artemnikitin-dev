@@ -1410,11 +1410,36 @@ class TelegramLeadService:
                 self.index_chat_name,
                 len(archived_ids),
             )
-        except Exception:
-            LOG.exception(
-                "Не удалось пакетно переместить существующие чаты из «%s» в архив",
-                self.index_chat_name,
-            )
+        except Exception as exc:
+            flood_seconds = int(getattr(exc, "seconds", 0) or 0)
+            if flood_seconds:
+                LOG.warning(
+                    "Telegram разрешит пакетный перенос чатов в архив через %s сек.; "
+                    "повтор запланирован автоматически",
+                    flood_seconds,
+                )
+                await asyncio.sleep(flood_seconds + 1)
+                try:
+                    archived_ids = await self.archive_entities_batch(
+                        existing_entities
+                    )
+                    self.managed_chat_ids.update(archived_ids)
+                    LOG.info(
+                        "Повторный пакетный перенос чатов из «%s» выполнен: %s",
+                        self.index_chat_name,
+                        len(archived_ids),
+                    )
+                except Exception:
+                    LOG.exception(
+                        "Не удалось повторно пакетно переместить существующие "
+                        "чаты из «%s» в архив",
+                        self.index_chat_name,
+                    )
+            else:
+                LOG.exception(
+                    "Не удалось пакетно переместить существующие чаты из «%s» в архив",
+                    self.index_chat_name,
+                )
 
         muted = 0
         for entity in existing_entities:
