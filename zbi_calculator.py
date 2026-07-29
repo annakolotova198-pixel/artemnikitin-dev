@@ -655,7 +655,7 @@ def _set_table_borders(table, value="nil", color="FFFFFF", size="0"):
         tag.set(qn("w:sz"), size)
 
 
-def build_proposal_document(quote, form):
+def build_proposal_document(quote, form, preliminary=False):
     """Create a branded commercial proposal showing only client-facing prices."""
     document = Document()
     section = document.sections[0]
@@ -702,7 +702,11 @@ def build_proposal_document(quote, form):
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title.paragraph_format.space_before = Pt(12)
     title.paragraph_format.space_after = Pt(2)
-    title_run = title.add_run("КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ")
+    title_run = title.add_run(
+        "ПРЕДВАРИТЕЛЬНОЕ КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ"
+        if preliminary
+        else "КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ"
+    )
     title_run.bold = True
     title_run.font.name = "Calibri"
     title_run.font.size = Pt(20)
@@ -774,10 +778,16 @@ def build_proposal_document(quote, form):
     total_run.bold = True
     total_run.font.size = Pt(15)
     total_run.font.color.rgb = RGBColor(15, 86, 132)
-    note = document.add_paragraph(
+    note_text = (
+        "Предложение сформировано по предварительному расчёту выбранных изделий. "
+        "Цены включают доставку до указанного объекта. Количество, стоимость, наличие, "
+        "сроки поставки и график рейсов уточняются при подтверждении заказа."
+        if preliminary
+        else
         'Все указанные цены являются конечными и включают доставку до указанного объекта. '
         "Окончательные сроки поставки и график рейсов согласовываются при подтверждении заказа."
     )
+    note = document.add_paragraph(note_text)
     note.paragraph_format.space_after = Pt(10)
 
     document.add_paragraph("Реквизиты поставщика", style="Heading 2")
@@ -1013,8 +1023,8 @@ PAGE = r"""
 <title>Калькулятор заявки ЖБИ</title>
 <style>
 :root{--ink:#18202a;--muted:#647184;--blue:#185bd8;--line:#dce3ec;--bg:#f3f6fa;--ok:#e9f8ef;--danger:#a62d2d}
-*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1380px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}.span4{grid-column:span 4}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.remove{background:#fff;color:var(--danger);border-color:#e6bcbc;padding:7px;min-height:34px}.hint,.muted{color:var(--muted);font-size:13px}.suggestions{max-height:360px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px}.suggestion{display:block;width:100%;min-height:0;padding:10px 12px;background:#fff;color:var(--ink);text-align:left;border:0;border-bottom:1px solid #edf0f4;border-radius:0;cursor:pointer}.suggestion:hover,.suggestion.selected{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px;font-weight:400}.list-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:7px}.transport-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.transport-choice{padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8faff}.calculate-footer{display:flex;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin-top:20px;padding-top:18px;border-top:1px solid var(--line)}.calculate-footer button{max-width:420px}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:#fff6df;border:1px solid #f0d58a}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{background:#f5f8fc;border-radius:12px;padding:14px}.kpi b{display:block;font-size:22px;margin-top:4px}.delivery{border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:12px}.badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1;vertical-align:top}th{font-size:12px;color:var(--muted)}.money{font-weight:800;white-space:nowrap}.empty{text-align:center;color:var(--muted);padding:24px}.actions{display:flex;gap:10px;align-items:end}.actions>*{flex:1}
-@media(max-width:900px){body{padding:12px}.grid{grid-template-columns:1fr}.span2,.span4{grid-column:span 1}.kpis{grid-template-columns:1fr 1fr}.actions{display:block}.actions>*{margin-top:8px}}
+*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px}.wrap{max-width:1380px;margin:auto}.card{background:#fff;border-radius:16px;padding:22px;margin-bottom:18px;box-shadow:0 5px 18px #20305012}h1,h2,h3{margin-top:0}.nav a{margin-right:18px;color:var(--blue);font-weight:700;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.span2{grid-column:span 2}.span4{grid-column:span 4}label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}input,select,button{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;background:#fff}button{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:700;cursor:pointer}.secondary{background:#fff;color:var(--blue)}.remove{background:#fff;color:var(--danger);border-color:#e6bcbc;padding:7px;min-height:34px}.hint,.muted{color:var(--muted);font-size:13px}.suggestions{max-height:360px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px}.suggestion{display:block;width:100%;min-height:0;padding:10px 12px;background:#fff;color:var(--ink);text-align:left;border:0;border-bottom:1px solid #edf0f4;border-radius:0;cursor:pointer}.suggestion:hover,.suggestion.selected{background:#eef4ff}.suggestion small{display:block;color:var(--muted);margin-top:3px;font-weight:400}.list-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:7px}.transport-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.transport-choice{padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8faff}.calculate-footer{display:flex;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin-top:20px;padding-top:18px;border-top:1px solid var(--line)}.calculate-footer button{max-width:420px}.proposal-panel{margin-top:18px;padding:17px;border:1px solid #b9cef8;border-radius:14px;background:linear-gradient(135deg,#f5f8ff,#eef4ff)}.proposal-panel h3{margin-bottom:6px}.proposal-panel .proposal-action{display:flex;justify-content:space-between;gap:18px;align-items:center}.proposal-panel button{max-width:390px;flex:0 0 390px}.summary{background:var(--ok);border:1px solid #bfe5cc}.warning{background:#fff6df;border:1px solid #f0d58a}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{background:#f5f8fc;border-radius:12px;padding:14px}.kpi b{display:block;font-size:22px;margin-top:4px}.delivery{border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:12px}.badges{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}.badge{background:#eef3ff;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:700}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1;vertical-align:top}th{font-size:12px;color:var(--muted)}.money{font-weight:800;white-space:nowrap}.empty{text-align:center;color:var(--muted);padding:24px}.actions{display:flex;gap:10px;align-items:end}.actions>*{flex:1}
+@media(max-width:900px){body{padding:12px}.grid{grid-template-columns:1fr}.span2,.span4{grid-column:span 1}.kpis{grid-template-columns:1fr 1fr}.actions{display:block}.actions>*{margin-top:8px}.proposal-panel .proposal-action{display:block}.proposal-panel button{max-width:none;margin-top:12px}}
 </style></head><body><div class="wrap">
 <div class="card nav"><a href="/">Нерудные материалы</a><a href="/zbi">Калькулятор ЖБИ</a><a href="/zbi/catalog-proposal">КП полного каталога</a><a href="/carriers">Перевозчики</a></div>
 <form method="post" id="quoteForm"><input type="hidden" name="items_json" id="itemsJson"><input type="hidden" name="vehicles_json" id="vehiclesJson"><input type="hidden" name="loads_json" id="loadsJson"><input type="hidden" name="delivery_prices_json" id="deliveryPricesJson">
@@ -1027,7 +1037,7 @@ PAGE = r"""
 <div><label>Количество, шт.</label><input id="addQuantity" type="number" min="1" step="1" value="1"></div><div class="span2"><label>Выбрано</label><input id="selectedName" readonly placeholder="Сначала выберите позицию из списка ниже"></div><div><label>&nbsp;</label><button type="button" id="addItem">Добавить в заявку</button></div>
 <div class="span4"><div class="list-head"><label style="margin:0">Выбор изделия из раздела</label><span id="productCount" class="muted"></span></div><div id="suggestions" class="suggestions"></div></div>
 </div>
-<h2 style="margin-top:24px">Состав заявки</h2><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Производитель</th><th>Габариты</th><th>Масса 1 шт.</th><th>Количество</th><th>Загрузка на 1 машину</th><th>Общая масса</th><th>Цена завода без доставки</th><th></th></tr></thead><tbody id="cartBody"></tbody></table></div><div id="emptyCart" class="empty">В заявке пока нет изделий</div><div id="transportChoices" class="transport-grid"></div><p id="transportHint" class="muted">Транспорт появится после добавления изделия. Поле «Загрузка на 1 машину» оставьте пустым для автоматического расчёта или задайте своё количество.</p><p class="muted"><b>Расчёт не запускается автоматически.</b> Сначала спокойно добавьте все позиции и настройте загрузку, затем нажмите кнопку ниже.</p>{% if quote %}<h2 style="margin-top:24px">Данные клиента для коммерческого предложения</h2><div class="grid"><div><label>Наименование компании</label><input name="client_company" value="{{ form.client_company }}"></div><div><label>ИНН</label><input name="client_inn" value="{{ form.client_inn }}"></div><div><label>ФИО контактного лица</label><input name="client_contact_name" value="{{ form.client_contact_name }}"></div><div><label>Контакт</label><input name="client_contact" value="{{ form.client_contact }}" placeholder="Телефон или e-mail"></div></div>{% endif %}<p id="pendingChanges" class="warning" style="display:none;padding:10px;border-radius:10px;margin-top:16px"><b>Заявка изменена.</b> Нажмите «Пересчитать заявку», чтобы обновить цены и количество рейсов.</p><div class="calculate-footer"><button type="submit">{{ 'Пересчитать заявку' if quote else 'Начать расчёт заявки' }}</button>{% if quote %}<button type="submit" class="secondary" formaction="/zbi/proposal.docx" formmethod="post">Скачать коммерческое предложение</button>{% endif %}</div></div>
+<h2 style="margin-top:24px">Состав заявки</h2><div class="table-wrap"><table><thead><tr><th>Изделие</th><th>Производитель</th><th>Габариты</th><th>Масса 1 шт.</th><th>Количество</th><th>Загрузка на 1 машину</th><th>Общая масса</th><th>Цена завода без доставки</th><th></th></tr></thead><tbody id="cartBody"></tbody></table></div><div id="emptyCart" class="empty">В заявке пока нет изделий</div><div id="transportChoices" class="transport-grid"></div><p id="transportHint" class="muted">Транспорт появится после добавления изделия. Поле «Загрузка на 1 машину» оставьте пустым для автоматического расчёта или задайте своё количество.</p><p class="muted"><b>Расчёт не запускается автоматически.</b> Сначала спокойно добавьте все позиции и настройте загрузку, затем нажмите кнопку ниже.</p>{% if quote %}<h2 style="margin-top:24px">Данные клиента для предварительного КП</h2><div class="grid"><div><label>Наименование компании</label><input name="client_company" value="{{ form.client_company }}"></div><div><label>ИНН</label><input name="client_inn" value="{{ form.client_inn }}"></div><div><label>ФИО контактного лица</label><input name="client_contact_name" value="{{ form.client_contact_name }}"></div><div><label>Контакт</label><input name="client_contact" value="{{ form.client_contact }}" placeholder="Телефон или e-mail"></div></div><div class="proposal-panel"><div class="proposal-action"><div><h3>Предварительное КП по этой заявке</h3><div class="muted">В документ попадут только просчитанные позиции, их количество, клиентские цены и сведения о рейсах. Закупочные цены и данные производителей клиенту не показываются.</div></div><button type="submit" formaction="/zbi/preliminary-proposal.docx" formmethod="post">Сформировать предварительное КП</button></div></div>{% endif %}<p id="pendingChanges" class="warning" style="display:none;padding:10px;border-radius:10px;margin-top:16px"><b>Заявка изменена.</b> Нажмите «Пересчитать заявку», чтобы обновить цены и количество рейсов.</p><div class="calculate-footer"><button type="submit">{{ 'Пересчитать заявку' if quote else 'Начать расчёт заявки' }}</button></div></div>
 </form>
 {% if error %}<div class="card warning"><b>Не удалось выполнить расчёт.</b> {{ error }}</div>{% endif %}
 {% if quote %}
@@ -1217,6 +1227,7 @@ def catalog_proposal_docx():
     )
 
 
+@zbi_bp.route("/preliminary-proposal.docx", methods=["POST"])
 @zbi_bp.route("/proposal.docx", methods=["POST"])
 def proposal_docx():
     products, delivery_rows = load_catalog()
@@ -1247,13 +1258,18 @@ def proposal_docx():
     )
     if not quote["deliveries"]:
         return "Не удалось подобрать транспорт для коммерческого предложения.", 400
-    document = build_proposal_document(quote, form)
+    preliminary = request.path.endswith("/preliminary-proposal.docx")
+    document = build_proposal_document(quote, form, preliminary=preliminary)
     output = BytesIO()
     document.save(output)
     output.seek(0)
     return send_file(
         output,
         as_attachment=True,
-        download_name=f"КП_АР-ФАРВАТЕР_{date.today().isoformat()}.docx",
+        download_name=(
+            f"Предварительное_КП_АР-ФАРВАТЕР_{date.today().isoformat()}.docx"
+            if preliminary
+            else f"КП_АР-ФАРВАТЕР_{date.today().isoformat()}.docx"
+        ),
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
