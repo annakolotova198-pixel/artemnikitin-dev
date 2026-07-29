@@ -1097,8 +1097,40 @@ class TelegramLeadService:
         self.owner_ids.update(
             int(value) for value in stored_owner_ids.split(",") if value.strip().lstrip("-").isdigit()
         )
+        self.subscriber_ids = {
+            int(value)
+            for value in csv_set("TG_SUBSCRIBER_IDS")
+            if value.lstrip("-").isdigit()
+        }
+        stored_subscriber_ids = self.store.get_config("subscriber_ids")
+        self.subscriber_ids.update(
+            int(value)
+            for value in stored_subscriber_ids.split(",")
+            if value.strip().lstrip("-").isdigit()
+        )
         self.user = TelegramClient(StringSession(self.user_session), self.api_id, self.api_hash)
         self.bot = TelegramClient("telegram_lead_bot", self.api_id, self.api_hash)
+
+    def notification_ids(self) -> set[int]:
+        return self.owner_ids | self.subscriber_ids
+
+    def subscribe(self, user_id: int) -> bool:
+        user_id = int(user_id)
+        if user_id in self.subscriber_ids:
+            return False
+        self.subscriber_ids.add(user_id)
+        self.store.set_config(
+            "subscriber_ids",
+            ",".join(str(value) for value in sorted(self.subscriber_ids)),
+        )
+        return True
+
+    def unsubscribe(self, user_id: int) -> None:
+        self.subscriber_ids.discard(int(user_id))
+        self.store.set_config(
+            "subscriber_ids",
+            ",".join(str(value) for value in sorted(self.subscriber_ids)),
+        )
 
     def validate(self) -> None:
         missing = [
@@ -1664,7 +1696,7 @@ class TelegramLeadService:
         lead_id = self.store.add(lead) if lead else None
         if lead_id and notify:
             row = self.store.by_id(lead_id)
-            for owner_id in self.owner_ids:
+            for owner_id in self.notification_ids():
                 try:
                     await self.bot.send_message(
                         owner_id,
@@ -1726,28 +1758,30 @@ class TelegramLeadService:
         text = (event.raw_text or "").strip()
         command, _, argument = text.partition(" ")
         command = command.lower().split("@")[0]
-        if event.sender_id not in self.owner_ids:
-            valid_claim = (
-                command == "/claim"
-                and self.claim_token
-                and secrets.compare_digest(argument.strip(), self.claim_token)
-            )
-            if not valid_claim:
-                return
-            self.owner_ids.add(int(event.sender_id))
-            self.store.set_config("owner_ids", ",".join(str(value) for value in sorted(self.owner_ids)))
+        if not getattr(event, "is_private", False):
+            return
+        sender_id = int(event.sender_id)
+        if command in {"/stop", "/unsubscribe"}:
+            self.unsubscribe(sender_id)
             await event.respond(
-                "✅ Аккаунт владельца привязан. Код больше не показывайте и удалите сообщение с ним.",
+                "🔕 Вы отписались от новых заявок. Чтобы подписаться снова, отправьте /start.",
                 parse_mode="html",
             )
             return
+        subscribed_now = self.subscribe(sender_id)
         if command in {"/start", "/help"}:
             response = (
-                "Парсер строительных заявок работает.\n\n"
-                "/status — состояние базы\n"
+                "✅ Парсер строительных заявок работает.\n"
+                + (
+                    "Вы подписаны на новые заявки.\n\n"
+                    if subscribed_now
+                    else "Подписка на новые заявки активна.\n\n"
+                )
+                + "/status — состояние базы\n"
                 "/last 10 — последние заявки\n"
                 "/lead 123 — полная заявка\n"
-                "/search песок — поиск по товару, адресу или тексту"
+                "/search песок — поиск по товару, адресу или тексту\n"
+                "/stop — отключить новые заявки"
             )
         elif command == "/status":
             if self.index_chat_name and not self.index_loaded:
@@ -1855,7 +1889,39 @@ class BotApiLeadService:
         self.owner_ids.update(
             int(value) for value in stored_owner_ids.split(",") if value.strip().lstrip("-").isdigit()
         )
+        self.subscriber_ids = {
+            int(value)
+            for value in csv_set("TG_SUBSCRIBER_IDS")
+            if value.lstrip("-").isdigit()
+        }
+        stored_subscriber_ids = self.store.get_config("subscriber_ids")
+        self.subscriber_ids.update(
+            int(value)
+            for value in stored_subscriber_ids.split(",")
+            if value.strip().lstrip("-").isdigit()
+        )
         self.offset = 0
+
+    def notification_ids(self) -> set[int]:
+        return self.owner_ids | self.subscriber_ids
+
+    def subscribe(self, user_id: int) -> bool:
+        user_id = int(user_id)
+        if user_id in self.subscriber_ids:
+            return False
+        self.subscriber_ids.add(user_id)
+        self.store.set_config(
+            "subscriber_ids",
+            ",".join(str(value) for value in sorted(self.subscriber_ids)),
+        )
+        return True
+
+    def unsubscribe(self, user_id: int) -> None:
+        self.subscriber_ids.discard(int(user_id))
+        self.store.set_config(
+            "subscriber_ids",
+            ",".join(str(value) for value in sorted(self.subscriber_ids)),
+        )
 
     def validate(self) -> None:
         missing = []
@@ -1924,25 +1990,29 @@ class BotApiLeadService:
         command = command.lower().split("@")[0]
         sender_id = int(message.get("from", {}).get("id", 0))
         chat_id = int(message["chat"]["id"])
-        if sender_id not in self.owner_ids:
-            valid_claim = (
-                command == "/claim"
-                and self.claim_token
-                and secrets.compare_digest(argument.strip(), self.claim_token)
-            )
-            if not valid_claim:
-                return True
-            self.owner_ids.add(sender_id)
-            self.store.set_config("owner_ids", ",".join(str(value) for value in sorted(self.owner_ids)))
-            self.send(chat_id, "✅ Аккаунт владельца привязан. Удалите сообщение с кодом.")
+        if message.get("chat", {}).get("type") != "private":
             return True
+        if command in {"/stop", "/unsubscribe"}:
+            self.unsubscribe(sender_id)
+            self.send(
+                chat_id,
+                "🔕 Вы отписались от новых заявок. Чтобы подписаться снова, отправьте /start.",
+            )
+            return True
+        subscribed_now = self.subscribe(sender_id)
         if command in {"/start", "/help"}:
             response = (
-                "Парсер строительных заявок работает.\n\n"
-                "/status — состояние базы\n"
+                "✅ Парсер строительных заявок работает.\n"
+                + (
+                    "Вы подписаны на новые заявки.\n\n"
+                    if subscribed_now
+                    else "Подписка на новые заявки активна.\n\n"
+                )
+                + "/status — состояние базы\n"
                 "/last 10 — последние заявки\n"
                 "/lead 123 — полная заявка\n"
-                "/search песок — поиск по базе"
+                "/search песок — поиск по базе\n"
+                "/stop — отключить новые заявки"
             )
         elif command == "/status":
             response = f"✅ Парсер работает\nЗаявок в базе: <b>{self.store.count()}</b>"
@@ -1995,7 +2065,7 @@ class BotApiLeadService:
         if not lead_id:
             return
         row = self.store.by_id(lead_id)
-        for owner_id in self.owner_ids:
+        for owner_id in self.notification_ids():
             try:
                 self.send(owner_id, row_to_text(row))
             except Exception:
