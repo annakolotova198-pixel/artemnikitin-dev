@@ -194,7 +194,7 @@ def _revision_hint(title: str) -> str:
 def _discover(source: KnowledgeSource, limit: int = 40):
     response = requests.get(
         source.url,
-        timeout=30,
+        timeout=12,
         headers={"User-Agent": USER_AGENT, "Accept-Language": "ru-RU,ru;q=0.9"},
     )
     response.raise_for_status()
@@ -312,10 +312,13 @@ def _page_facts(url: str, limit: int = 10) -> list[str]:
 
 
 def _knowledge_article(row) -> tuple[str, str]:
-    try:
-        facts = _page_facts(row["source_url"])
-    except Exception:
+    if row["publisher"].startswith("Нормативная библиотека"):
         facts = []
+    else:
+        try:
+            facts = _page_facts(row["source_url"])
+        except Exception:
+            facts = []
     if row["summary"] and row["summary"] not in facts:
         facts.insert(0, row["summary"])
     if len(facts) == 1:
