@@ -313,6 +313,76 @@ def _future_slots(count: int) -> list[datetime]:
 def schedule_queue(target_size: int = 21) -> int:
     connection = _connect()
     try:
+        # Rebalance an already-filled news queue after technical/project material
+        # becomes available. This also repairs queues restored from Sheets.
+        scheduled_rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT id, source, scheduled_at
+                FROM dzen_articles
+                WHERE status='scheduled' AND scheduled_at IS NOT NULL
+                ORDER BY scheduled_at
+                """
+            ).fetchall()
+        ]
+        prepared_pool = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT id, source
+                FROM dzen_articles
+                WHERE status='prepared'
+                ORDER BY COALESCE(source_date, '') DESC, id DESC
+                """
+            ).fetchall()
+        ]
+        for current_row in scheduled_rows:
+            slot = datetime.fromisoformat(current_row["scheduled_at"])
+            if slot.hour < 11:
+                preferred = {"АНСБ", "НОПРИЗ"}
+            elif slot.hour < 17:
+                preferred = {"technical", "regulation"}
+            else:
+                preferred = {"major_project"}
+            if current_row["source"] in preferred:
+                continue
+            replacement_index = next(
+                (
+                    index
+                    for index, row in enumerate(prepared_pool)
+                    if row["source"] in preferred
+                ),
+                None,
+            )
+            if replacement_index is None:
+                continue
+            replacement = prepared_pool.pop(replacement_index)
+            connection.execute(
+                """
+                UPDATE dzen_articles
+                SET status='prepared', scheduled_at=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (datetime.now(MOSCOW).isoformat(), current_row["id"]),
+            )
+            connection.execute(
+                """
+                UPDATE dzen_articles
+                SET status='scheduled', scheduled_at=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    current_row["scheduled_at"],
+                    datetime.now(MOSCOW).isoformat(),
+                    replacement["id"],
+                ),
+            )
+            prepared_pool.append(
+                {"id": current_row["id"], "source": current_row["source"]}
+            )
+        connection.commit()
+
         scheduled_count = connection.execute(
             "SELECT COUNT(*) FROM dzen_articles WHERE status='scheduled'"
         ).fetchone()[0]
