@@ -468,11 +468,16 @@ def _worker() -> None:
         try:
             current = time.time()
             if not sheets_restored:
-                from dzen_google_store import enabled, restore_queue
+                try:
+                    from dzen_google_store import enabled, restore_queue
 
-                if enabled():
-                    restore_queue()
-                sheets_restored = True
+                    if enabled():
+                        restore_queue()
+                except Exception as exc:
+                    print("Dzen queue restore:", str(exc)[:500], flush=True)
+                finally:
+                    # A temporary Google quota error must never stop ingestion.
+                    sheets_restored = True
             if current >= next_ingest:
                 ingest()
                 next_ingest = current + 30 * 60
@@ -485,11 +490,15 @@ def _worker() -> None:
                 next_knowledge_ingest = current + 6 * 60 * 60
             publish_due()
             if current >= next_sheet_sync:
-                from dzen_google_store import enabled, sync_all
+                try:
+                    from dzen_google_store import enabled, sync_all
 
-                if enabled():
-                    sync_all()
-                next_sheet_sync = current + 15 * 60
+                    if enabled():
+                        sync_all()
+                except Exception as exc:
+                    print("Dzen sheet sync:", str(exc)[:500], flush=True)
+                finally:
+                    next_sheet_sync = current + 60 * 60
         except Exception as exc:
             print("Dzen content worker:", str(exc)[:500], flush=True)
         time.sleep(45)
