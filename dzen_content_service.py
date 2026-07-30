@@ -43,6 +43,7 @@ USER_AGENT = (
 )
 TELEGRAM_CAPTION_LIMIT = 1024
 PUBLICATION_TEXT_LIMIT = 1000
+LONGFORM_MIN_CHARS = 6000
 CONTACT_FOOTER = (
     "АР-ФАРВАТЕР\n"
     "Сайт: https://ar-farvater.ru/\n"
@@ -589,6 +590,18 @@ def publish_due() -> dict:
         ).fetchall()
         for row in rows:
             try:
+                if len(str(row["article_text"] or "").strip()) < LONGFORM_MIN_CHARS:
+                    connection.execute(
+                        """
+                        UPDATE dzen_articles
+                        SET status='needs_rewrite', scheduled_at=NULL,
+                            error='Материал короче стандарта лонгрида', updated_at=?
+                        WHERE id=?
+                        """,
+                        (now.isoformat(), row["id"]),
+                    )
+                    failed += 1
+                    continue
                 publication_text = _publication_text(
                     row["article_title"],
                     row["article_text"],
