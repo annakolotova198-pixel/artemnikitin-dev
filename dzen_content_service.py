@@ -41,6 +41,18 @@ USER_AGENT = (
     "Mozilla/5.0 (compatible; AR-Farvater-Dzen/1.0; "
     "+https://artemnikitin-dev.onrender.com/)"
 )
+TELEGRAM_CAPTION_LIMIT = 1024
+PUBLICATION_TEXT_LIMIT = 1000
+CONTACT_FOOTER = (
+    "АР-ФАРВАТЕР\n"
+    "Сайт: https://ar-farvater.ru/\n"
+    "Почта: nzzk@mail.ru\n"
+    "Телефон: +7 916 727-36-87"
+)
+DEFAULT_ARTICLE_IMAGES = (
+    "https://ar-farvater.ru/media/image-cache/slideshow/resize1758111504038.60d3e98b.jpg",
+    "https://ar-farvater.ru/media/image-cache/site/resize1758117936909.57e3d5ab.jpg",
+)
 
 
 @dataclass(frozen=True)
@@ -445,17 +457,106 @@ def _telegram_token() -> str:
     )
 
 
-def _send_telegram(text: str) -> int:
+def _configured_default_images() -> list[str]:
+    configured = [
+        value.strip()
+        for value in os.getenv("DZEN_DEFAULT_IMAGE_URLS", "").split(",")
+        if value.strip()
+    ]
+    return configured or list(DEFAULT_ARTICLE_IMAGES)
+
+
+def _valid_public_image_url(value: str) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
+
+def _article_images(source_url: str, primary_image: str = "") -> list[str]:
+    """Return two images: a source photo plus a branded construction fallback."""
+    images: list[str] = []
+
+    def add(value: str) -> None:
+        value = str(value or "").strip()
+        lowered = value.lower()
+        if (
+            _valid_public_image_url(value)
+            and value not in images
+            and not lowered.endswith(".svg")
+            and not any(marker in lowered for marker in ("favicon", "avatar", "icon-"))
+        ):
+            images.append(value)
+
+    add(primary_image)
+    if len(images) < 2 and _allowed_url(source_url):
+        try:
+            soup = BeautifulSoup(_request(source_url).text, "lxml")
+            for node in soup.select(
+                'meta[property="og:image"], article img[src], main img[src]'
+            ):
+                add(urljoin(source_url, node.get("content") or node.get("src") or ""))
+                if len(images) >= 2:
+                    break
+        except Exception:
+            pass
+    for value in _configured_default_images():
+        add(value)
+        if len(images) >= 2:
+            break
+    return images[:2]
+
+
+def _publication_text(
+    title: str,
+    text: str,
+    source: str,
+    source_url: str,
+) -> str:
+    """Keep a heading, source and full company contacts within caption limits."""
+    title = _clean_text(title)
+    body = str(text or "").strip()
+    if title and not body.startswith(title):
+        body = f"{title}\n\n{body}"
+
+    # Replace the old source/author tail with one predictable footer.
+    if source_url and source_url in body:
+        source_position = body.rfind(source_url)
+        previous_line = body.rfind("\n", 0, source_position)
+        source_label_line = body.rfind("\n", 0, max(previous_line, 0))
+        if source_label_line >= 0:
+            body = body[:source_label_line].rstrip()
+
+    footer = f"\n\nИсточник: {source}\n{source_url}\n\n{CONTACT_FOOTER}"
+    available = PUBLICATION_TEXT_LIMIT - len(footer)
+    if len(body) > available:
+        body = body[: max(0, available - 1)].rsplit(" ", 1)[0].rstrip() + "…"
+    result = body + footer
+    if len(result) > TELEGRAM_CAPTION_LIMIT:
+        raise ValueError("Telegram caption exceeds the photo-post limit")
+    return result
+
+
+def _send_telegram(text: str, image_urls: list[str]) -> int:
     token = _telegram_token()
     channel = os.getenv("DZEN_TG_CHANNEL", "").strip()
     if not token or not channel:
         raise RuntimeError("DZEN_TG_CHANNEL или токен Telegram не настроен")
+    if len(image_urls) < 2:
+        raise RuntimeError("Для статьи не удалось подобрать две фотографии")
     response = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
+        f"https://api.telegram.org/bot{token}/sendMediaGroup",
         json={
             "chat_id": channel,
-            "text": text,
-            "disable_web_page_preview": False,
+            "media": [
+                {
+                    "type": "photo",
+                    "media": image_urls[0],
+                    "caption": text,
+                },
+                {
+                    "type": "photo",
+                    "media": image_urls[1],
+                },
+            ],
         },
         timeout=30,
     )
@@ -463,7 +564,10 @@ def _send_telegram(text: str) -> int:
     payload = response.json()
     if not payload.get("ok"):
         raise RuntimeError(payload.get("description", "Telegram API error"))
-    return int(payload["result"]["message_id"])
+    result = payload.get("result") or []
+    if not result:
+        raise RuntimeError("Telegram API returned an empty media group")
+    return int(result[0]["message_id"])
 
 
 def publish_due() -> dict:
@@ -475,7 +579,8 @@ def publish_due() -> dict:
         now = datetime.now(MOSCOW)
         rows = connection.execute(
             """
-            SELECT id, article_text FROM dzen_articles
+            SELECT id, source, source_url, article_title, article_text, image_url
+            FROM dzen_articles
             WHERE status='scheduled' AND scheduled_at <= ?
             ORDER BY scheduled_at ASC
             LIMIT 3
@@ -484,7 +589,14 @@ def publish_due() -> dict:
         ).fetchall()
         for row in rows:
             try:
-                message_id = _send_telegram(row["article_text"])
+                publication_text = _publication_text(
+                    row["article_title"],
+                    row["article_text"],
+                    row["source"],
+                    row["source_url"],
+                )
+                image_urls = _article_images(row["source_url"], row["image_url"])
+                message_id = _send_telegram(publication_text, image_urls)
                 connection.execute(
                     """
                     UPDATE dzen_articles
