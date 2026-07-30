@@ -11,6 +11,6 @@ else:
     from telegram_lead_parser import start_background_parser
 
 
-start_background_parser()
 install_routes(app)
 start_dzen_content_worker()
+start_background_parser()
