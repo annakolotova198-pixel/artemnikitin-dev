@@ -214,6 +214,136 @@ def ingest_knowledge() -> dict:
     return {"added": added, "source_errors": errors}
 
 
+def _page_facts(url: str, limit: int = 10) -> list[str]:
+    """Extract short factual paragraphs without copying a whole publication."""
+    response = requests.get(
+        url,
+        timeout=30,
+        headers={"User-Agent": USER_AGENT, "Accept-Language": "ru-RU,ru;q=0.9"},
+    )
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "lxml")
+    for node in soup.select("script, style, nav, footer, form, aside"):
+        node.decompose()
+    container = soup.select_one("article") or soup.select_one("main") or soup.body
+    facts: list[str] = []
+    if container:
+        for node in container.select("p, li"):
+            text = _clean_text(node.get_text(" ", strip=True))
+            if 70 <= len(text) <= 600 and text not in facts:
+                facts.append(text)
+            if len(facts) >= limit:
+                break
+    return facts
+
+
+def _knowledge_article(row) -> tuple[str, str]:
+    facts = _page_facts(row["source_url"])
+    if len(facts) < 2:
+        raise ValueError("Недостаточно фактов для технического разбора")
+
+    code = row["document_code"] or row["title"]
+    if row["category"] in {"technical", "regulation"}:
+        title = f"{code}: что проверить на стройке до начала работ"
+        sections = [
+            title, "", facts[0], "",
+            "Что регулирует документ", " ".join(facts[1:3]), "",
+            "Где чаще всего возникает ошибка",
+            (
+                "Проблема обычно начинается не на площадке, а раньше: в проекте, "
+                "ведомости объёмов или закупке. Поэтому сверять нужно не только "
+                "исполнение, но и исходное задание, узел, спецификацию и актуальную редакцию."
+            ),
+            "", "Чек-лист для проекта и снабжения",
+            "1. Проверить обозначение и действующую редакцию документа.",
+            "2. Найти требования, относящиеся именно к вашему узлу и условиям эксплуатации.",
+            "3. Сверить проект, спецификацию, сертификаты и исполнительную документацию.",
+            "4. Зафиксировать расхождения до закупки и монтажа.", "",
+            (
+                "Важно: это практический обзор, а не замена нормативного документа. "
+                "Перед решением проверьте полный текст и статус редакции в официальном источнике."
+            ),
+        ]
+    else:
+        title = f"{row['title']}: как устроен крупный строительный проект"
+        sections = [
+            title, "", facts[0], "", "Что строят", " ".join(facts[1:3]), "",
+            "На что смотреть профессионалу",
+            " ".join(facts[3:5]) if len(facts) > 3 else (
+                "Для оценки проекта важны не только площадь и стоимость: смотрим "
+                "на этапность, инженерную инфраструктуру, логистику площадки, "
+                "сроки и связь объекта с городской средой."
+            ),
+            "", "Практический вывод",
+            (
+                "Большой объект — это всегда соревнование не одного подрядчика, а всей "
+                "цепочки решений. Чем раньше проектировщик, снабжение и производство "
+                "синхронизируют данные, тем меньше дорогих сюрпризов появляется на монтаже."
+            ),
+        ]
+
+    sections.extend([
+        "", f"Источник: {row['publisher']}", row["source_url"], "",
+        "Автор: Артём Никитин, генеральный директор «АР-ФАРВАТЕР».",
+    ])
+    text = "\n".join(sections)
+    if len(text) > 4050:
+        text = text[:3900].rsplit(" ", 1)[0] + (
+            f"\n\nИсточник: {row['publisher']}\n{row['source_url']}"
+        )
+    return title[:140], text
+
+
+def prepare_knowledge_articles(limit: int = 30) -> dict:
+    """Promote indexed official sources into the common publishing queue."""
+    connection = _connect()
+    _ensure_table(connection)
+    prepared = errors = 0
+    now = datetime.now(MOSCOW).isoformat()
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, category, publisher, title, source_url, source_hash,
+                   document_code, revision_hint
+            FROM dzen_knowledge
+            WHERE status='indexed'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1, min(limit, 100)),),
+        ).fetchall()
+        for row in rows:
+            try:
+                title, text = _knowledge_article(row)
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO dzen_articles
+                    (source, source_url, source_hash, source_title, article_title,
+                     article_text, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
+                    """,
+                    (
+                        row["category"], row["source_url"], row["source_hash"],
+                        row["title"], title, text, now, now,
+                    ),
+                )
+                prepared += int(bool(cursor.rowcount))
+                connection.execute(
+                    "UPDATE dzen_knowledge SET status='prepared', error='' WHERE id=?",
+                    (row["id"],),
+                )
+            except Exception as exc:
+                errors += 1
+                connection.execute(
+                    "UPDATE dzen_knowledge SET status='error', error=? WHERE id=?",
+                    (str(exc)[:500], row["id"]),
+                )
+        connection.commit()
+    finally:
+        connection.close()
+    return {"prepared": prepared, "errors": errors}
+
+
 def knowledge_status(limit: int = 30) -> dict:
     connection = _connect()
     _ensure_table(connection)
@@ -235,4 +365,3 @@ def knowledge_status(limit: int = 30) -> dict:
         return {"totals": totals, "items": [dict(row) for row in rows]}
     finally:
         connection.close()
-

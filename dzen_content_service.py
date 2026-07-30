@@ -317,15 +317,16 @@ def schedule_queue(target_size: int = 21) -> int:
             "SELECT COUNT(*) FROM dzen_articles WHERE status='scheduled'"
         ).fetchone()[0]
         needed = max(0, target_size - scheduled_count)
-        rows = connection.execute(
-            """
-            SELECT id FROM dzen_articles
-            WHERE status='prepared'
-            ORDER BY COALESCE(source_date, '') DESC, id DESC
-            LIMIT ?
-            """,
-            (needed,),
-        ).fetchall()
+        rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT id, source FROM dzen_articles
+                WHERE status='prepared'
+                ORDER BY COALESCE(source_date, '') DESC, id DESC
+                """
+            ).fetchall()
+        ]
         if not rows:
             return 0
         occupied = {
@@ -334,15 +335,35 @@ def schedule_queue(target_size: int = 21) -> int:
                 "SELECT scheduled_at FROM dzen_articles WHERE status='scheduled'"
             ).fetchall()
         }
-        slots = [slot for slot in _future_slots(target_size + len(occupied)) if slot.isoformat() not in occupied]
+        slots = [
+            slot
+            for slot in _future_slots(target_size + len(occupied))
+            if slot.isoformat() not in occupied
+        ]
         now = datetime.now(MOSCOW).isoformat()
-        for row, slot in zip(rows, slots):
+        selected: list[tuple[dict, datetime]] = []
+        remaining = list(rows)
+        for slot in slots:
+            if len(selected) >= needed or not remaining:
+                break
+            if slot.hour < 11:
+                preferred = {"АНСБ", "НОПРИЗ"}
+            elif slot.hour < 17:
+                preferred = {"technical", "regulation"}
+            else:
+                preferred = {"major_project"}
+            index = next(
+                (i for i, row in enumerate(remaining) if row["source"] in preferred),
+                0,
+            )
+            selected.append((remaining.pop(index), slot))
+        for row, slot in selected:
             connection.execute(
                 "UPDATE dzen_articles SET status='scheduled', scheduled_at=?, updated_at=? WHERE id=?",
                 (slot.isoformat(), now, row["id"]),
             )
         connection.commit()
-        return len(rows)
+        return len(selected)
     finally:
         connection.close()
 
@@ -456,9 +477,11 @@ def _worker() -> None:
                 ingest()
                 next_ingest = current + 30 * 60
             if current >= next_knowledge_ingest:
-                from dzen_knowledge import ingest_knowledge
+                from dzen_knowledge import ingest_knowledge, prepare_knowledge_articles
 
                 ingest_knowledge()
+                prepare_knowledge_articles()
+                schedule_queue()
                 next_knowledge_ingest = current + 6 * 60 * 60
             publish_due()
             if current >= next_sheet_sync:
@@ -520,12 +543,13 @@ def install_routes(app) -> None:
         supplied = request.headers.get("X-Dzen-Admin-Token", "")
         if not expected or supplied != expected:
             return jsonify({"error": "forbidden"}), 403
-        from dzen_knowledge import ingest_knowledge
+        from dzen_knowledge import ingest_knowledge, prepare_knowledge_articles
         from dzen_google_store import enabled, sync_all
 
         result = {
             "ingest": ingest(),
             "knowledge": ingest_knowledge(),
+            "technical_articles": prepare_knowledge_articles(),
             "publish": publish_due(),
         }
         if enabled():
