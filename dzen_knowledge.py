@@ -258,30 +258,9 @@ def ingest_knowledge() -> dict:
                     ),
                 )
                 added += int(bool(cursor.rowcount))
-        if added == 0 and errors == len(SOURCES):
-            for category, code, title, summary in FALLBACK_TOPICS:
-                anchor = re.sub(r"[^a-zа-я0-9]+", "-", code.lower()).strip("-")
-                url = f"https://www.minstroyrf.gov.ru/docs/#{anchor}"
-                source_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
-                cursor = connection.execute(
-                    """
-                    INSERT OR IGNORE INTO dzen_knowledge
-                    (category, publisher, title, source_url, source_hash,
-                     document_code, revision_hint, summary, discovered_at)
-                    VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)
-                    """,
-                    (
-                        category,
-                        "Нормативная библиотека «АР-ФАРВАТЕР»",
-                        title,
-                        url,
-                        source_hash,
-                        code,
-                        summary,
-                        now,
-                    ),
-                )
-                added += int(bool(cursor.rowcount))
+        # Не создаём «источники» из внутренних заготовок. Если официальные
+        # страницы временно недоступны, материал должен ждать следующего
+        # сканирования, а не публиковаться с вымышленным издателем и ссылкой.
         connection.commit()
     finally:
         connection.close()
@@ -312,13 +291,10 @@ def _page_facts(url: str, limit: int = 10) -> list[str]:
 
 
 def _knowledge_article(row) -> tuple[str, str]:
-    if row["publisher"].startswith("Нормативная библиотека"):
+    try:
+        facts = _page_facts(row["source_url"])
+    except Exception:
         facts = []
-    else:
-        try:
-            facts = _page_facts(row["source_url"])
-        except Exception:
-            facts = []
     if row["summary"] and row["summary"] not in facts:
         facts.insert(0, row["summary"])
     if len(facts) == 1:
